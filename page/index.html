@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow</title>
+<style>
+  :root { --bg: #f7f7f5; --fg: #1d1d1b; --muted: #6b6b66; --card: #fff; --line: #e2e2dc; --run: #2f6fde; --ok: #1f8a4c; --bad: #c43c3c; --wait: #b98a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ececea; --muted: #9a9a94; --card: #1f1f1e; --line: #33332f; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 24px 0 8px; }
+  .muted { color: var(--muted); } form { display: flex; gap: 8px; flex-wrap: wrap; }
+  input, select, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+  button { cursor: pointer; } input[name=text] { flex: 1; min-width: 200px; }
+  .run { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .boxes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .box { border: 2px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+  .box.running, .status-running { border-color: var(--run); color: var(--run); }
+  .box.done, .status-done { border-color: var(--ok); color: var(--ok); }
+  .box.failed, .status-failed { border-color: var(--bad); color: var(--bad); }
+  .status-stopped { color: var(--wait); }
+  .err { color: var(--bad); font-size: 13px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Flow</h1>
+<div class="muted">Simple view for build step 1. The board and canvas come in step 2.</div>
+
+<h2>Start a run</h2>
+<form id="start">
+  <select name="templateId" id="templates"></select>
+  <input name="text" placeholder="Input (Jira key or text)">
+  <button>Start</button>
+</form>
+
+<h2>Runs</h2>
+<div id="runs" class="muted">Loading…</div>
+
+<script>
+const runs = new Map();
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function render() {
+  const list = [...runs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  document.getElementById('runs').innerHTML = list.length ? list.map((r) => `
+    <div class="run">
+      <b>${esc(r.templateName)}</b> <span class="status-${esc(r.status)}">${esc(r.status)}</span>
+      <span class="muted">· $${(r.cost || 0).toFixed(4)} · ${esc(r.input?.text)} · ${esc(r.id)}</span>
+      ${r.status === 'running' ? `<button data-act="stop" data-id="${esc(r.id)}">Stop</button>` : ''}
+      ${['stopped', 'failed'].includes(r.status) ? `<button data-act="resume" data-id="${esc(r.id)}">Resume</button>` : ''}
+      <div class="boxes">${r.boxes.map((b) => `<span class="box ${esc(b.status)}" title="${esc(b.summary || b.error || b.note || '')}">${esc(b.label)}</span>`).join('')}</div>
+      ${r.error ? `<div class="err">${esc(r.error)}</div>` : ''}
+    </div>`).join('') : 'No runs yet.';
+}
+
+document.getElementById('runs').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (b) await api('POST', `/api/runs/${b.dataset.id}/${b.dataset.act}`).catch((err) => alert(err.message));
+});
+
+document.getElementById('start').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  await api('POST', '/api/runs', { templateId: f.get('templateId'), input: { text: f.get('text') } }).catch((err) => alert(err.message));
+});
+
+api('GET', '/api/templates').then((ts) => {
+  document.getElementById('templates').innerHTML = ts.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+});
+
+const es = new EventSource('/api/events');
+es.addEventListener('hello', (e) => { runs.clear(); for (const r of JSON.parse(e.data).runs) runs.set(r.id, r); render(); });
+es.addEventListener('run', (e) => { const r = JSON.parse(e.data); runs.set(r.id, r); render(); });
+</script>
+</body>
+</html>

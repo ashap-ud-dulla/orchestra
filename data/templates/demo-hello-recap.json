@@ -1,0 +1,9 @@
+{
+  "id": "demo-hello-recap",
+  "name": "Demo: hello then recap",
+  "tracking": false,
+  "boxes": [
+    { "id": "hello", "skill": "flow-hello", "label": "Say hello", "waitAfter": false },
+    { "id": "recap", "skill": "flow-recap", "label": "Recap", "waitAfter": false }
+  ]
+}
