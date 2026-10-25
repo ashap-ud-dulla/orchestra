@@ -12,7 +12,7 @@ import { childEnv, killOrphan } from '../lib/runner.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 7171;
 const BASE = `http://127.0.0.1:${PORT}`;
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-test-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-test-'));
 const dataDir = path.join(tmp, 'data');
 const runsDir = path.join(tmp, 'runs');
 fs.mkdirSync(path.join(dataDir, 'templates'), { recursive: true });
@@ -21,12 +21,12 @@ fs.copyFileSync(path.join(ROOT, 'data/templates/demo-hello-recap.json'), path.jo
 let server = null;
 function startServer(extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, FLOW_PORT: String(PORT), FLOW_DATA_DIR: dataDir, FLOW_RUNS_DIR: runsDir, FLOW_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), FLOW_TEST: '1', ...extraEnv };
+    const env = { ...process.env, ORCHESTRA_PORT: String(PORT), ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_TEST: '1', ...extraEnv };
     server = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     server.stdout.on('data', (d) => {
       out += d;
-      if (out.includes('Flow is running')) resolve();
+      if (out.includes('Orchestra is running')) resolve();
     });
     server.stderr.on('data', (d) => process.stderr.write(d));
     server.once('exit', (code) => reject(new Error(`server exited early (${code}): ${out}`)));
@@ -93,7 +93,7 @@ test('child claude gets no API key and no parent-session variables', () => {
   }
 });
 
-test('orphan kill never hits Flow itself or a process that started at another time', () => {
+test('orphan kill never hits Orchestra itself or a process that started at another time', () => {
   assert.equal(killOrphan(process.pid, new Date().toISOString()), false);
   if (process.platform === 'win32') assert.equal(killOrphan(process.ppid, undefined), false, 'no spawn time, no kill');
   // This node process is a "node" image, but it started long before this fake spawn time.
@@ -101,10 +101,10 @@ test('orphan kill never hits Flow itself or a process that started at another ti
   assert.equal(killOrphan(parent, '2000-01-01T00:00:00Z'), false);
 });
 
-test('skills list includes Flow test skills and team skills', async () => {
+test('skills list includes Orchestra test skills and team skills', async () => {
   const { body } = await api('GET', '/api/skills');
   const names = body.map((s) => s.name);
-  assert.ok(names.includes('flow-hello') && names.includes('flow-recap'));
+  assert.ok(names.includes('orchestra-hello') && names.includes('orchestra-recap'));
   if (fs.existsSync('C:\\Workstation\\Workspace\\ITP\\.claude\\skills\\review-changes')) {
     assert.equal(body.find((s) => s.name === 'review-changes')?.source, 'team');
   }
@@ -119,9 +119,9 @@ test('a 2-box run finishes, and box 2 resumes the same session', async () => {
   assert.equal(done.boxes[0].tokens.input, 100);
   const c = calls(done);
   assert.equal(c.length, 2);
-  assert.equal(c[0].prompt, '/flow-hello Bappy');
+  assert.equal(c[0].prompt, '/orchestra-hello Bappy');
   assert.equal(c[0].resumed, false);
-  assert.equal(c[1].prompt, '/flow-recap');
+  assert.equal(c[1].prompt, '/orchestra-recap');
   assert.equal(c[1].resumed, true);
   assert.equal(c[1].sessionId, c[0].sessionId);
   assert.equal(done.sessionId, c[0].sessionId);
@@ -151,7 +151,7 @@ test('server killed mid-box: restart resumes the run and finishes it', async () 
 
 test('a failing box fails the run; resume after the fix finishes it', async () => {
   await killServer();
-  await startServer({ FAKE_CLAUDE_FAIL_SKILL: 'flow-recap' });
+  await startServer({ FAKE_CLAUDE_FAIL_SKILL: 'orchestra-recap' });
   const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x' } });
   const failed = await waitStatus(run.id, 'failed');
   assert.deepEqual(failed.boxes.map((b) => b.status), ['done', 'failed']);
@@ -218,7 +218,7 @@ test('a clean shutdown clears the saved pid', async () => {
 
 test('a claude that dies without a result shows its error text', async () => {
   await killServer();
-  await startServer({ FLOW_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude-crash.mjs') });
+  await startServer({ ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude-crash.mjs') });
   const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'z' } });
   const failed = await waitStatus(run.id, 'failed');
   assert.match(failed.boxes[0].error, /without a result: .*No conversation found/);
@@ -265,7 +265,7 @@ test('requests from other sites are blocked', async () => {
 });
 
 test('a second server on the same port refuses to start', async () => {
-  const env = { ...process.env, FLOW_PORT: String(PORT), FLOW_DATA_DIR: dataDir, FLOW_RUNS_DIR: runsDir };
+  const env = { ...process.env, ORCHESTRA_PORT: String(PORT), ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir };
   const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: 'ignore' });
   const code = await new Promise((r) => p.once('exit', r));
   assert.equal(code, 2);

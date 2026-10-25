@@ -1,4 +1,4 @@
-// Flow server: API + live events (SSE) + the page. Node 22, no npm packages.
+// Orchestra server: API + live events (SSE) + the page. Node 22, no npm packages.
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -75,7 +75,7 @@ const routes = [
 ];
 
 // Windows cannot send SIGINT to a child process, so the tests call the clean-stop path here.
-if (process.env.FLOW_TEST === '1') {
+if (process.env.ORCHESTRA_TEST === '1') {
   routes.push(['POST', /^\/api\/test\/shutdown$/, () => (setImmediate(() => stop('test')), { ok: true })]);
 }
 
@@ -147,7 +147,7 @@ let stopping = false;
 function stop(reason) {
   if (stopping) return;
   stopping = true;
-  console.log(`Flow stopping (${reason}). Unfinished runs resume on next start.`);
+  console.log(`Orchestra stopping (${reason}). Unfinished runs resume on next start.`);
   runner.shutdown();
   for (const res of clients) res.end();
   server.close();
@@ -158,7 +158,7 @@ process.on('exit', () => runner.shutdown());
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
-    console.error(`Port ${config.port} is busy. Flow may already be running (http://localhost:${config.port}), or another app uses it. Set FLOW_PORT to pick another port.`);
+    console.error(`Port ${config.port} is busy. Orchestra may already be running (http://localhost:${config.port}), or another app uses it. Set ORCHESTRA_PORT to pick another port.`);
     process.exit(2);
   }
   throw err;
@@ -166,5 +166,5 @@ server.on('error', (err) => {
 
 server.listen(config.port, config.host, async () => {
   await runner.init();
-  console.log(`Flow is running: http://localhost:${config.port}`);
+  console.log(`Orchestra is running: http://localhost:${config.port}`);
 });

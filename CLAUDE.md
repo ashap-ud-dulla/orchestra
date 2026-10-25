@@ -1,9 +1,9 @@
-# Flow — personal tool
+# Orchestra — personal tool
 
 Personal tool. Never call Teamspace. Never touch ITPKV.
 Never edit the itp-workspace repo or anything under `.claude/users/`.
 
-Flow only touches ITP in three ways:
+Orchestra only touches ITP in three ways:
 1. Reads the skill list from `<ITP>/.claude/skills` (and your user skills folder).
 2. Creates git worktrees of ITP repos for runs (build step 4).
 3. Runs do their own work inside those worktrees.

@@ -1,9 +1,9 @@
 ---
-name: flow-recap
-description: Flow test skill. Reads hello.txt and writes a one-line recap. Used to test Flow runs.
+name: orchestra-recap
+description: Orchestra test skill. Reads hello.txt and writes a one-line recap. Used to test Orchestra runs.
 ---
 
-# flow-recap
+# orchestra-recap
 
 1. Read `hello.txt` in the current folder.
 2. Write `recap.txt` with one line: `Recap: <the greeting>` plus the word count.
