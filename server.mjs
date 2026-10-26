@@ -6,6 +6,7 @@ import { config } from './lib/config.mjs';
 import { scanSkills } from './lib/skills-scan.mjs';
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from './lib/store.mjs';
 import { Runner } from './lib/runner.mjs';
+import { listRepos, branchesFor, branchNameFor } from './lib/workspace.mjs';
 
 const runner = new Runner();
 const clients = new Set(); // open SSE connections
@@ -71,13 +72,16 @@ const routes = [
     broadcast('settings', s);
     return s;
   }],
+  ['GET', /^\/api\/repos$/, (req) => listRepos({ fresh: query(req).get('fresh') === '1' })],
+  ['GET', /^\/api\/repos\/([\w-]+)\/branches$/, (_req, [token]) => branchesFor(token)],
+  ['GET', /^\/api\/branch-name$/, (req) => ({ branch: branchNameFor(query(req).get('input'), 'run-000000') })],
   ['GET', /^\/api\/runs$/, () => runner.list()],
   ['POST', /^\/api\/runs$/, async (req) => {
     const body = await readBody(req);
-    return runner.createRun({ templateId: body.templateId, input: body.input, start: body.start !== false });
+    return runner.createRun({ templateId: body.templateId, input: body.input, start: body.start !== false, repos: body.repos });
   }],
   ['GET', /^\/api\/runs\/([^/]+)$/, (_req, [id]) => runner.get(id) ?? notFound('run')],
-  ['DELETE', /^\/api\/runs\/([^/]+)$/, (_req, [id]) => runner.deleteRun(id)],
+  ['DELETE', /^\/api\/runs\/([^/]+)$/, (req, [id]) => runner.deleteRun(id, { force: query(req).get('force') === '1' })],
   ['GET', /^\/api\/runs\/([^/]+)\/timeline$/, (_req, [id]) => runner.timeline(id)],
   ['PUT', /^\/api\/runs\/([^/]+)\/boxes$/, async (req, [id]) => runner.updateBoxes(id, (await readBody(req)).boxes)],
   ['POST', /^\/api\/runs\/([^/]+)\/chat$/, async (req, [id]) => runner.chat(id, (await readBody(req)).text)],
@@ -89,6 +93,10 @@ const routes = [
 // Windows cannot send SIGINT to a child process, so the tests call the clean-stop path here.
 if (process.env.ORCHESTRA_TEST === '1') {
   routes.push(['POST', /^\/api\/test\/shutdown$/, () => (setImmediate(() => stop('test')), { ok: true })]);
+}
+
+function query(req) {
+  return new URL(req.url, 'http://localhost').searchParams;
 }
 
 function notFound(what) {

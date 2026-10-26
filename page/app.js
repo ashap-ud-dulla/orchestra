@@ -6,6 +6,7 @@ const state = {
   runs: new Map(),
   templates: [],
   skills: [],
+  repos: [], // ITP repos a run can get worktrees of
   settings: { maxRunning: 2 },
   copyFrom: null, // a template to open as "… (copy)" in the editor
   route: { name: 'board' },
@@ -266,6 +267,9 @@ function renderHead() {
       <div class="row">
         <input id="tpl-name" value="${esc(t.name)}" style="min-width:260px;font-weight:600">
         <label class="check"><input type="checkbox" id="tpl-tracking" ${t.tracking !== false ? 'checked' : ''}> Tracking on</label>
+        <span class="row small" title="Each run of this template gets a worktree of these repos. You can change them when you start a run.">Repos:
+          ${cloned().map((r) => `<label class="check"><input type="checkbox" data-tpl-repo="${esc(r.token)}" ${(t.repos || []).includes(r.token) ? 'checked' : ''}> ${esc(r.token)}</label>`).join('') || '<span class="muted">none found</span>'}
+        </span>
         <span class="grow"></span>
         <span class="muted small">${state.ed.dirty ? 'Not saved' : 'Saved'}</span>
         <button class="primary" data-act="save-template" ${state.ed.dirty ? '' : 'disabled'}>Save</button>
@@ -291,6 +295,7 @@ function renderHead() {
       ${r.status !== 'running' ? act('delete-run', 'Delete', 'danger') : ''}
     </div>
     ${r.input?.text ? `<div class="input">${esc(r.input.text)}</div>` : ''}
+    ${workspaceLine(r)}
     ${r.status === 'question' ? `<div class="callout">“${esc(r.boxes.find((b) => b.status === 'question')?.label)}” asks you something. Answer in the chat on the right. The box goes on with your answer.</div>` : ''}
     ${r.status === 'approval' ? approvalPanel(r) : ''}
     ${r.status === 'waiting' ? `<div class="small" style="color:var(--wait)">Waiting for you after “${esc(waitBox?.label || r.waitingAfter)}”. Check its result, then press Continue.</div>` : ''}
@@ -310,7 +315,7 @@ function renderCanvas() {
     const asks = b.status === 'question' || b.status === 'approval';
     const status = run ? b.status : '';
     return `<div class="node ${esc(status)} ${gate || asks ? 'gate' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}">
-      ${b.waitAfter ? '<span class="pause" title="Waits for you after this box">wait</span>' : ''}
+      ${b.waitAfter || b.usesApp ? `<span class="pause">${[b.waitAfter && '<span title="Waits for you after this box">wait</span>', b.usesApp && '<span title="Starts the app; takes turns with other runs">app</span>'].filter(Boolean).join(' · ')}</span>` : ''}
       <div class="label">${esc(b.label || b.skill)}</div>
       <div class="skillname">/${esc(b.skill)}${b.args ? ' ' + esc(b.args.slice(0, 40)) : ''}</div>
       <div class="foot">${run ? `<span class="chip ${esc(gate ? 'waiting' : status)}">${esc(gate ? 'your turn' : b.status === 'approval' ? 'approve?' : status)}</span><span>${b.cost ? money(b.cost) : ''}${b.attempts > 1 ? ` · try ${b.attempts}` : ''}</span>` : '<span></span>'}</div>
@@ -352,6 +357,7 @@ function renderInspector() {
       <label>Skill <input value="/${esc(b.skill)}" disabled></label>
       <label class="wide">Extra text for the skill <textarea data-field="args" rows="2" ${free ? '' : 'disabled'} placeholder="Added after /${esc(b.skill)}">${esc(b.args || '')}</textarea></label>
       <label class="check wide"><input type="checkbox" data-field="waitAfter" ${b.waitAfter ? 'checked' : ''} ${soft ? '' : 'disabled'}> Wait for me after this box</label>
+      <label class="check wide"><input type="checkbox" data-field="usesApp" ${b.usesApp ? 'checked' : ''} ${soft ? '' : 'disabled'}> Starts the app to test it (takes turns with other runs)</label>
     </div>
     ${run ? `
       <div class="row small muted" style="margin:10px 0 6px">
@@ -422,7 +428,7 @@ async function loadTimeline() {
 // ---------- editing boxes ----------
 
 async function commitBoxes(boxes) {
-  const plain = boxes.map(({ id, skill, label, args, waitAfter }) => ({ id, skill, label, args: args || '', waitAfter: !!waitAfter }));
+  const plain = boxes.map(({ id, skill, label, args, waitAfter, usesApp }) => ({ id, skill, label, args: args || '', waitAfter: !!waitAfter, usesApp: !!usesApp }));
   if (state.ed.kind === 'template') {
     state.ed.tpl.boxes = plain;
     state.ed.dirty = true;
@@ -474,16 +480,32 @@ async function act(name, el) {
     case 'approve':
     case 'reject':
       return api('POST', `/api/runs/${encodeURIComponent(run.id)}/approve`, { ok: name === 'approve', note: $('#approval-note')?.value || '' }).catch(fail);
-    case 'delete-run':
-      if (!confirm('Delete this run and its files?')) return;
-      return api('DELETE', `/api/runs/${encodeURIComponent(run.id)}`).then(() => (location.hash = '#/')).catch(fail);
+    case 'delete-run': {
+      const ws = run.workspace ? ' Its workspace (worktrees) is removed too; the branches stay.' : '';
+      if (!confirm(`Delete this run and its files?${ws}`)) return;
+      const url = `/api/runs/${encodeURIComponent(run.id)}`;
+      try {
+        await api('DELETE', url);
+      } catch (err) {
+        if (!/uncommitted work/.test(err.message)) return fail(err);
+        if (!confirm(`${err.message}\n\nThis work is lost if you delete. Delete anyway?`)) return;
+        try {
+          await api('DELETE', `${url}?force=1`);
+        } catch (err2) {
+          return fail(err2);
+        }
+      }
+      location.hash = '#/';
+      return;
+    }
     case 'save-as-template': {
       const n = prompt('Name for the new template:', `${run.templateName} (copy)`);
       if (!n) return;
       await loadTemplates();
       const id = slug(n, new Set(state.templates.map((t) => t.id)));
-      const boxes = run.boxes.map(({ id, skill, label, args, waitAfter }) => ({ id, skill, label, args, waitAfter }));
-      return api('PUT', `/api/templates/${id}`, { id, name: n, tracking: run.tracking, boxes })
+      const boxes = run.boxes.map(({ id, skill, label, args, waitAfter, usesApp }) => ({ id, skill, label, args, waitAfter, usesApp: !!usesApp }));
+      const repos = (run.repoPlan || []).map((p) => p.token);
+      return api('PUT', `/api/templates/${id}`, { id, name: n, tracking: run.tracking, repos, boxes })
         .then(() => alert(`Saved as template “${n}”.`)).catch(fail);
     }
     case 'save-template': {
@@ -529,6 +551,19 @@ async function act(name, el) {
   }
 }
 
+// The ITP repos that are cloned on this PC, so a run can get worktrees of them.
+const cloned = () => state.repos.filter((r) => r.cloned);
+
+// Same rule as the server: feature/<Jira key>, else a few words of the input.
+function branchName(input) {
+  const key = /\b[A-Z][A-Z0-9]+-\d+\b/.exec(input || '')?.[0];
+  if (key) return `feature/${key}`;
+  const words = String(input || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean).slice(0, 5).join('-');
+  return words ? `feature/${words}` : '';
+}
+
+let startBranchTouched = false; // you typed your own branch name: stop filling it from the input
+
 async function openStart(templateId) {
   await loadTemplates();
   const dlg = $('#start-dialog');
@@ -536,21 +571,101 @@ async function openStart(templateId) {
   sel.innerHTML = state.templates.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
   if (templateId) sel.value = templateId;
   $('textarea[name=text]', dlg).value = '';
+  startBranchTouched = false;
+  renderStartRepos();
   dlg.showModal();
 }
 
-$('#start-dialog').addEventListener('close', async (e) => {
-  const dlg = e.target;
-  if (!['start', 'draft'].includes(dlg.returnValue)) return;
-  const f = new FormData($('#start-form'));
+// One line per repo: tick it to give the run a worktree, on a new or an existing branch.
+function renderStartRepos() {
+  const box = $('#start-repos');
+  const repos = cloned();
+  if (!repos.length) {
+    box.innerHTML = '';
+    return;
+  }
+  const tpl = state.templates.find((t) => t.id === $('select[name=templateId]').value);
+  const picked = new Set(tpl?.repos || []);
+  const name = branchName($('textarea[name=text]').value);
+  box.innerHTML = `
+    <div class="repo-plan">
+      <label>New branch name (same in every repo) <input id="start-branch" value="${esc(name)}" placeholder="feature/PROJ-101"></label>
+      ${repos.map((r) => `
+        <div class="repo-row" data-token="${esc(r.token)}">
+          <label class="check"><input type="checkbox" data-pick ${picked.has(r.token) ? 'checked' : ''}> <b>${esc(r.token)}</b> <span class="muted small">${esc(r.folder)}</span></label>
+          <select data-mode><option value="new">new branch</option><option value="existing">existing branch</option></select>
+          <span data-new class="small">from <input data-base value="${esc(r.defaultBase || '')}" size="26"></span>
+          <span data-existing class="small" hidden><select data-existing-branch><option value="">loading…</option></select></span>
+        </div>`).join('')}
+      <div class="muted small">Ticked repos get their own worktree for this run. Your own checkouts are not switched. <code>main</code> is refused.</div>
+    </div>`;
+}
+
+$('select[name=templateId]').addEventListener('change', renderStartRepos);
+$('textarea[name=text]').addEventListener('input', (e) => {
+  const b = $('#start-branch');
+  if (b && !startBranchTouched) b.value = branchName(e.target.value);
+});
+$('#start-repos').addEventListener('input', (e) => {
+  if (e.target.id === 'start-branch') startBranchTouched = true;
+});
+$('#start-repos').addEventListener('change', async (e) => {
+  const row = e.target.closest('.repo-row');
+  if (!row || !e.target.matches('[data-mode]')) return;
+  const existing = e.target.value === 'existing';
+  $('[data-new]', row).hidden = existing;
+  $('[data-existing]', row).hidden = !existing;
+  $('[data-pick]', row).checked = true;
+  const sel = $('[data-existing-branch]', row);
+  if (existing && sel.options.length <= 1 && !sel.dataset.loaded) {
+    try {
+      const { branches } = await api('GET', `/api/repos/${encodeURIComponent(row.dataset.token)}/branches`);
+      // Branches checked out elsewhere are shown but cannot be picked.
+      const free = branches.filter((b) => !b.inUse);
+      sel.innerHTML = [...free, ...branches.filter((b) => b.inUse)].map((b) => `<option value="${esc(b.name)}" ${b.inUse ? 'disabled' : ''}>${esc(b.name)}${b.inUse ? ' (in use)' : ''}</option>`).join('') || '<option value="">no branches</option>';
+      sel.dataset.loaded = '1';
+    } catch (err) {
+      sel.innerHTML = `<option value="">${esc(err.message)}</option>`;
+    }
+  }
+});
+
+function startRepos() {
+  const branch = $('#start-branch')?.value.trim() || '';
+  return [...document.querySelectorAll('#start-repos .repo-row')].filter((row) => $('[data-pick]', row).checked).map((row) => {
+    const mode = $('[data-mode]', row).value;
+    return mode === 'existing'
+      ? { token: row.dataset.token, mode, branch: $('[data-existing-branch]', row).value }
+      : { token: row.dataset.token, mode, branch, base: $('[data-base]', row).value.trim() };
+  });
+}
+
+// The form stays open when the server says no, so nothing you typed is lost.
+$('#start-form').addEventListener('submit', async (e) => {
+  const how = e.submitter?.value;
+  if (!['start', 'draft'].includes(how)) return; // Cancel closes the dialog
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = { templateId: f.get('templateId'), input: { text: f.get('text') }, start: how === 'start' };
+  if (cloned().length) body.repos = startRepos();
   try {
-    const run = await api('POST', '/api/runs', { templateId: f.get('templateId'), input: { text: f.get('text') }, start: dlg.returnValue === 'start' });
+    const run = await api('POST', '/api/runs', body);
     state.runs.set(run.id, run);
+    $('#start-dialog').close();
     location.hash = `#/run/${encodeURIComponent(run.id)}`;
   } catch (err) {
     fail(err);
   }
 });
+
+// Where the run works: its workspace, or what it will get when it starts.
+function workspaceLine(r) {
+  const repos = r.workspace?.repos || r.repoPlan || [];
+  if (!repos.length) return '';
+  const list = repos.map((p) => `${esc(p.token)} on <code>${esc(p.branch)}</code>${p.mode === 'new' && p.base ? ` <span class="muted">(new, from ${esc(p.base)})</span>` : ''}`).join(' · ');
+  const where = r.workspace?.ready ? `Workspace <code>${esc(r.workspace.dir)}</code>` : 'Workspace is made when the run starts';
+  return `<div class="small">${where}: ${list}</div>`;
+}
 
 // ---------- events ----------
 
@@ -588,11 +703,12 @@ document.addEventListener('change', (e) => {
   if (field) return updateSelected(field, e.target.type === 'checkbox' ? e.target.checked : e.target.value);
 });
 
-// Template name and tracking: update in place, so a click on Save right after typing is not lost.
+// Template name, tracking and repos: update in place, so a click on Save right after typing is not lost.
 document.addEventListener('input', (e) => {
-  if (state.ed?.kind !== 'template' || !['tpl-name', 'tpl-tracking'].includes(e.target.id)) return;
+  if (state.ed?.kind !== 'template' || !(['tpl-name', 'tpl-tracking'].includes(e.target.id) || e.target.dataset.tplRepo)) return;
   state.ed.tpl.name = $('#tpl-name').value.trim() || 'Untitled';
   state.ed.tpl.tracking = $('#tpl-tracking').checked;
+  state.ed.tpl.repos = [...document.querySelectorAll('[data-tpl-repo]:checked')].map((x) => x.dataset.tplRepo);
   state.ed.dirty = true;
   $('[data-act=save-template]').disabled = false;
 });
@@ -715,7 +831,7 @@ function connect() {
 setInterval(() => state.route.name === 'board' && renderBoard(), 30000);
 
 (async function main() {
-  state.skills = await api('GET', '/api/skills').catch(() => []);
+  [state.skills, state.repos] = await Promise.all([api('GET', '/api/skills').catch(() => []), api('GET', '/api/repos').catch(() => [])]);
   window.addEventListener('hashchange', onRoute);
   connect();
   await onRoute();

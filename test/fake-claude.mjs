@@ -2,6 +2,7 @@
 // FAKE_CLAUDE_SLEEP_MS: wait before the result (to test stop/restart mid-box).
 // FAKE_CLAUDE_FAIL_SKILL: report an error for this skill.
 // FAKE_CLAUDE_ASK_SKILL: this skill asks a question (ends with the ORCHESTRA:QUESTION line).
+// FAKE_CLAUDE_TOUCH: write a file named this in each run repo worktree (to test uncommitted work).
 // FAKE_CLAUDE_PUSH_SKILL: this skill tries `git push`, through the PreToolUse hook Orchestra passed in --settings.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -15,7 +16,7 @@ const sessionId = resumed ? arg('--resume') : crypto.randomUUID();
 const skill = (/^\/([\w:.-]+)/.exec(prompt) || [])[1] || '';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
-fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed, sessionId, rules: !!arg('--append-system-prompt'), allowPush: process.env.ORCHESTRA_ALLOW_PUSH }) + '\n');
+fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed, sessionId, rules: !!arg('--append-system-prompt'), allowPush: process.env.ORCHESTRA_ALLOW_PUSH, cwd: process.cwd(), itpRoot: process.env.ITP_ROOT, repoDirs: process.env.ITP_REPO_DIRS, branch: process.env.ITP_BRANCH_OVERRIDE, protect: process.env.ORCHESTRA_PROTECT }) + '\n');
 out({ type: 'system', subtype: 'init', session_id: sessionId, cwd: process.cwd() });
 out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Skill', input: { skill } }] } });
 
@@ -35,6 +36,10 @@ function reply() {
   }
   if (prompt.startsWith('The user did not approve')) return { text: 'OK, I did not push.' };
   return { text: `Ran ${skill}.` };
+}
+
+if (process.env.FAKE_CLAUDE_TOUCH && process.env.ITP_REPO_DIRS) {
+  for (const line of process.env.ITP_REPO_DIRS.split('\n')) fs.writeFileSync(`${line.slice(line.indexOf('=') + 1)}/${process.env.FAKE_CLAUDE_TOUCH}`, 'x');
 }
 
 const sleep = Number(process.env.FAKE_CLAUDE_SLEEP_MS || 0);

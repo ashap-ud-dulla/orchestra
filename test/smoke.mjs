@@ -22,7 +22,7 @@ fs.copyFileSync(path.join(ROOT, 'test/fixtures/demo-hello-recap.json'), path.joi
 let server = null;
 function startServer(extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, ORCHESTRA_PORT: String(PORT), ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_TEST: '1', ...extraEnv };
+    const env = { ...process.env, ORCHESTRA_PORT: String(PORT), ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_TEST: '1', ORCHESTRA_NOTIFY: '0', ...extraEnv };
     server = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     server.stdout.on('data', (d) => {
@@ -451,6 +451,149 @@ test('Reject: the box goes on without pushing', async () => {
   assert.match(last.prompt, /^The user did not approve the push\. Do not push\. The user says: not yet/);
   assert.equal(last.allowPush, '0');
   assert.equal(done.boxes[1].summary, 'OK, I did not push.');
+  await killServer();
+  await startServer();
+});
+
+// A fake ITP workspace: ITP's repo_dir_for, one repo (ITP-API) with a remote, node_modules, scripts, a vault.
+function makeFakeItp() {
+  const root = path.join(tmp, 'itp');
+  const sh = (args, cwd) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  fs.mkdirSync(path.join(root, 'scripts', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'scripts', 'lib', 'common.sh'), [
+    'ITP_ROOT="${ITP_ROOT:-$(pwd)}"',
+    'API_REPO="${API_REPO:-$ITP_ROOT/ITP-API}"',
+    'repo_dir_for() {',
+    '  case "$1" in',
+    '    api)            printf \'%s\' "$API_REPO" ;;',
+    '    itp-workspace)  printf \'%s\' "$ITP_ROOT" ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '}',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'scripts', 'hello.sh'), 'echo hi\n');
+  fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# fake ITP\n');
+  fs.mkdirSync(path.join(root, 'ITPKV'));
+  fs.writeFileSync(path.join(root, 'ITPKV', 'note.md'), 'vault\n');
+  sh(['init', '-q', '--bare', 'api-remote.git'], tmp);
+  sh(['clone', '-q', path.join(tmp, 'api-remote.git'), 'ITP-API'], root);
+  const api = path.join(root, 'ITP-API');
+  fs.writeFileSync(path.join(api, '.gitignore'), 'node_modules\n');
+  fs.writeFileSync(path.join(api, 'app.cs'), 'class A {}\n');
+  sh(['checkout', '-q', '-b', 'development/mission'], api);
+  sh(['add', '.'], api);
+  sh(['commit', '-qm', 'start'], api);
+  sh(['push', '-q', '-u', 'origin', 'development/mission'], api);
+  fs.mkdirSync(path.join(api, 'node_modules', 'left-pad'), { recursive: true });
+  fs.writeFileSync(path.join(api, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+  return { root, api, worktrees: path.join(tmp, 'wt') };
+}
+
+test('workspace: a run gets worktrees of its repos on its branch, with ITP linked around them', async () => {
+  const itp = makeFakeItp();
+  await killServer();
+  await startServer({ ORCHESTRA_ITP_ROOT: itp.root, ORCHESTRA_WORKTREES_DIR: itp.worktrees });
+  const { body: repos } = await api('GET', '/api/repos');
+  assert.deepEqual(repos.map((r) => r.token), ['api'], 'the ITP workspace repo itself is never offered');
+  assert.equal(repos[0].defaultBase, 'origin/development/mission');
+  const tpl = { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] };
+  assert.equal((await api('PUT', '/api/templates/ws-demo', tpl)).status, 200);
+  try {
+    const { body: run } = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'PROJ-9 fix it' } });
+    assert.deepEqual(run.repoPlan.map((p) => [p.token, p.mode, p.branch, p.base]), [['api', 'new', 'feature/PROJ-9', 'origin/development/mission']]);
+    const done = await waitStatus(run.id, 'done');
+    const ws = done.workspace.dir;
+    const wt = path.join(ws, 'ITP-API');
+    assert.equal(spawnSync('git', ['-C', wt, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'feature/PROJ-9');
+    assert.equal(spawnSync('git', ['-C', itp.api, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'development/mission', 'your checkout is not switched');
+    assert.ok(fs.lstatSync(path.join(ws, 'scripts')).isSymbolicLink(), 'folders are linked');
+    assert.ok(fs.lstatSync(path.join(ws, 'ITPKV')).isSymbolicLink());
+    assert.ok(!fs.lstatSync(path.join(ws, 'CLAUDE.md')).isSymbolicLink(), 'files are copied');
+    assert.ok(fs.lstatSync(path.join(wt, 'node_modules')).isSymbolicLink(), 'node_modules is shared, not reinstalled');
+    const [c] = fs.readFileSync(path.join(ws, 'fake-calls.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(path.resolve(c.cwd), path.resolve(ws), 'claude starts in the workspace');
+    assert.equal(path.resolve(c.itpRoot), path.resolve(ws));
+    assert.equal(c.branch, 'feature/PROJ-9');
+    assert.match(c.repoDirs, /^api=.*ITP-API$/);
+    assert.match(c.protect, /ITP-API$/, 'your own checkout is protected');
+
+    // The same branch cannot be used twice; main and taken names are refused.
+    const again = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'existing', branch: 'feature/PROJ-9' }] });
+    assert.equal(again.status, 409);
+    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'new', branch: 'main' }] })).status, 400);
+    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'new', branch: 'development/mission' }] })).status, 400);
+
+    // Uncommitted work blocks a delete, unless you say so. Deleting never touches your real files.
+    fs.writeFileSync(path.join(wt, 'wip.txt'), 'not committed');
+    assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 409);
+    assert.equal((await api('DELETE', `/api/runs/${run.id}?force=1`)).status, 200);
+    assert.equal(fs.existsSync(ws), false, 'the workspace is gone');
+    assert.ok(fs.existsSync(path.join(itp.api, 'node_modules', 'left-pad', 'index.js')), 'real node_modules kept');
+    assert.ok(fs.existsSync(path.join(itp.root, 'scripts', 'hello.sh')), 'real scripts kept');
+    assert.ok(fs.existsSync(path.join(itp.root, 'ITPKV', 'note.md')), 'real vault kept');
+    assert.ok(spawnSync('git', ['-C', itp.api, 'show-ref', '--verify', '--quiet', 'refs/heads/feature/PROJ-9']).status === 0, 'the branch is kept');
+  } finally {
+    await api('DELETE', '/api/templates/ws-demo');
+  }
+});
+
+test('workspace: an existing branch can be picked again after its run is gone', async () => {
+  await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] });
+  try {
+    const { status, body: run } = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'again' }, repos: [{ token: 'api', mode: 'existing', branch: 'feature/PROJ-9' }] });
+    assert.equal(status, 200, JSON.stringify(run));
+    const done = await waitStatus(run.id, 'done');
+    assert.equal(spawnSync('git', ['-C', path.join(done.workspace.dir, 'ITP-API'), 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'feature/PROJ-9');
+    assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 200, 'nothing uncommitted: no force needed');
+  } finally {
+    await api('DELETE', '/api/templates/ws-demo');
+    await killServer();
+    await startServer();
+  }
+});
+
+test('guard: edits in your own checkout of a run repo are blocked', () => {
+  const env = { ORCHESTRA_PROTECT: 'C:/Work/ITP/ITP-API' };
+  assert.equal(check('Write', { file_path: 'C:\\Work\\ITP\\ITP-API\\src\\a.cs' }, env)?.needsApproval, false);
+  assert.equal(check('Edit', { file_path: 'C:/Work/ITP/ITP-API-Tools/a.cs' }, env), null, 'a different folder');
+  assert.equal(check('Edit', { file_path: 'C:/o/0/ITP-API/a.cs' }, env), null, 'the run worktree');
+  assert.equal(check('Bash', { command: 'cd /c/Work/ITP/ITP-API && dotnet build' }, env)?.needsApproval, false);
+  assert.equal(check('Bash', { command: 'cd ITP-API && dotnet build' }, env), null);
+});
+
+test('app lock: only one run at a time uses the app; the other waits', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_SLEEP_MS: '1500' });
+  const ids = [];
+  for (const t of ['app1', 'app2']) {
+    const { body: d } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: t }, start: false });
+    await api('PUT', `/api/runs/${d.id}/boxes`, { boxes: [{ id: 'hello', skill: 'orchestra-hello', usesApp: true }] });
+    ids.push(d.id);
+  }
+  for (const id of ids) await api('POST', `/api/runs/${id}/resume`);
+  let both = false;
+  let waited = false;
+  await waitFor(async () => {
+    const runs = await Promise.all(ids.map(getRun));
+    if (runs.every((r) => r.boxes[0].status === 'running')) both = true;
+    if (runs.some((r) => /Waiting for the app/.test(r.boxes[0].note || ''))) waited = true;
+    return runs.every((r) => r.status === 'done');
+  }, 'both runs to finish', 20000);
+  assert.equal(both, false, 'never both at once');
+  assert.equal(waited, true, 'one waited for the app');
+});
+
+test('a run that starts to need you sends a notification', async () => {
+  const { body: d } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'n' }, start: false });
+  await api('PUT', `/api/runs/${d.id}/boxes`, { boxes: [{ id: 'hello', skill: 'orchestra-hello', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }] });
+  await api('POST', `/api/runs/${d.id}/resume`);
+  await waitStatus(d.id, 'waiting');
+  const { body: tl } = await api('GET', `/api/runs/${d.id}/timeline`);
+  assert.ok(tl.some((e) => e.kind === 'log' && e.text === 'notification (off): is waiting for you'));
   await killServer();
   await startServer();
 });

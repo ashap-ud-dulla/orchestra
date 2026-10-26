@@ -152,3 +152,9 @@ dialog form { display: flex; flex-direction: column; gap: 12px; }
   .work { flex-direction: column; }
   .inspector { width: auto; border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* New run: repos and branches */
+.repo-plan { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.repo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.repo-row label.check { min-width: 150px; }
+code { font: 12px ui-monospace, Consolas, monospace; background: var(--soft); border-radius: 4px; padding: 0 4px; }
