@@ -13,7 +13,10 @@ const state = {
 };
 
 const SOURCES = { team: 'Team skills', mine: 'My ITP skills', global: 'My global skills', orchestra: 'Orchestra test skills' };
-const NEEDS_YOU = new Set(['waiting', 'failed', 'stopped', 'draft']);
+const NEEDS_YOU = new Set(['question', 'approval', 'waiting', 'failed', 'stopped', 'draft']);
+// The marker lines the AI ends a reply with. Orchestra reads them; people do not need to see them.
+const unmark = (t) => String(t ?? '').replace(/\n?[\s*`_]*ORCHESTRA:(?:QUESTION|APPROVAL)[\s*`_]*$/, '');
+const pushes = (b) => [...new Set((b?.approval?.requests || []).map((r) => r.command))];
 
 // ---------- helpers ----------
 
@@ -138,6 +141,8 @@ function card(r) {
   if (r.status === 'waiting') why = `<div class="why">Waiting for you after “${esc(label(r.waitingAfter))}”</div>`;
   else if (r.status === 'failed') why = `<div class="why bad">${esc((r.error || 'Failed').slice(0, 160))}</div>`;
   else if (r.status === 'stopped') why = '<div class="why">Stopped by you</div>';
+  else if (r.status === 'question') why = `<div class="why">Asks you: ${esc(unmark(r.boxes.find((b) => b.status === 'question')?.question).slice(0, 140))}</div>`;
+  else if (r.status === 'approval') why = `<div class="why">Wants to push: ${esc(pushes(r.boxes.find((b) => b.status === 'approval')).join('; ').slice(0, 140) || 'see the run')}</div>`;
   else if (r.status === 'draft') why = '<div class="why">Draft: check the boxes, then press Start</div>';
   else if (working) why = `<div class="why muted">Working on “${esc(working.label)}”</div>`;
   else if (r.status === 'queued') why = `<div class="why muted">Number ${queue().indexOf(r) + 1} in line</div>`;
@@ -182,10 +187,10 @@ function edBoxes() {
   return state.ed.kind === 'run' ? edRun()?.boxes || [] : state.ed.tpl.boxes;
 }
 
-// Finished and working boxes are locked at the front of a run.
+// Boxes that have started (finished, working, or waiting on you) are locked at the front of a run.
 function lockedCount() {
   if (state.ed.kind !== 'run') return 0;
-  return edBoxes().filter((b) => b.status === 'done' || b.status === 'running').length;
+  return edBoxes().filter((b) => ['done', 'running', 'question', 'approval'].includes(b.status)).length;
 }
 
 function canEdit() {
@@ -212,7 +217,7 @@ function mountEditor() {
       <div class="log" id="chat-log"></div>
       <form class="send" id="chat-form">
         <textarea name="text" rows="3" placeholder="Message the run's AI. Ctrl+Enter sends."></textarea>
-        <div class="row"><span class="muted small grow" id="chat-hint"></span><button class="primary">Send</button></div>
+        <div class="row"><span class="muted small grow" id="chat-hint"></span><button class="primary" id="chat-send">Send</button></div>
       </form>
     </aside>` : ''}
   </div>`;
@@ -252,6 +257,8 @@ function renderSkills() {
 
 function renderHead() {
   const el = $('#head');
+  // Do not redraw under the cursor while you type a note.
+  if (document.activeElement?.id === 'approval-note') return;
   if (state.ed.kind === 'template') {
     const t = state.ed.tpl;
     el.innerHTML = `
@@ -284,6 +291,8 @@ function renderHead() {
       ${r.status !== 'running' ? act('delete-run', 'Delete', 'danger') : ''}
     </div>
     ${r.input?.text ? `<div class="input">${esc(r.input.text)}</div>` : ''}
+    ${r.status === 'question' ? `<div class="callout">“${esc(r.boxes.find((b) => b.status === 'question')?.label)}” asks you something. Answer in the chat on the right. The box goes on with your answer.</div>` : ''}
+    ${r.status === 'approval' ? approvalPanel(r) : ''}
     ${r.status === 'waiting' ? `<div class="small" style="color:var(--wait)">Waiting for you after “${esc(waitBox?.label || r.waitingAfter)}”. Check its result, then press Continue.</div>` : ''}
     ${r.status === 'queued' ? `<div class="small muted">Number ${queue().indexOf(r) + 1} in line. It starts by itself when a slot is free (${state.settings.maxRunning} at once).</div>` : ''}
     ${r.error ? `<div class="err">${esc(r.error)}</div>` : ''}`;
@@ -298,12 +307,13 @@ function renderCanvas() {
   const node = (b, i) => {
     const movable = editable && i >= locked;
     const gate = run?.status === 'waiting' && run.waitingAfter === b.id;
+    const asks = b.status === 'question' || b.status === 'approval';
     const status = run ? b.status : '';
-    return `<div class="node ${esc(status)} ${gate ? 'gate' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}">
+    return `<div class="node ${esc(status)} ${gate || asks ? 'gate' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}">
       ${b.waitAfter ? '<span class="pause" title="Waits for you after this box">wait</span>' : ''}
       <div class="label">${esc(b.label || b.skill)}</div>
       <div class="skillname">/${esc(b.skill)}${b.args ? ' ' + esc(b.args.slice(0, 40)) : ''}</div>
-      <div class="foot">${run ? `<span class="chip ${esc(gate ? 'waiting' : status)}">${esc(gate ? 'your turn' : status)}</span><span>${b.cost ? money(b.cost) : ''}${b.attempts > 1 ? ` · try ${b.attempts}` : ''}</span>` : '<span></span>'}</div>
+      <div class="foot">${run ? `<span class="chip ${esc(gate ? 'waiting' : status)}">${esc(gate ? 'your turn' : b.status === 'approval' ? 'approve?' : status)}</span><span>${b.cost ? money(b.cost) : ''}${b.attempts > 1 ? ` · try ${b.attempts}` : ''}</span>` : '<span></span>'}</div>
     </div>`;
   };
   const end = run?.status === 'done' ? 'Done' : 'End';
@@ -351,8 +361,11 @@ function renderInspector() {
         ${b.durationMs != null ? `<span>${duration(b.durationMs)}</span>` : ''}
       </div>
       ${b.note ? `<div class="small muted">${esc(b.note)}</div>` : ''}
+      ${b.status === 'question' && b.question ? `<h3>It asks you</h3><pre>${esc(unmark(b.question))}</pre>` : ''}
+      ${b.status === 'approval' ? `<h3>Wants to push</h3><pre>${esc(pushes(b).join('\n') || '(see its result)')}</pre>` : ''}
+      ${(b.approvals || []).length ? `<h3>Your decisions</h3><pre>${esc(b.approvals.map((a) => `${a.ok ? 'Approved' : 'Not approved'}${a.note ? `: ${a.note}` : ''}`).join('\n'))}</pre>` : ''}
       ${b.error ? `<h3>Error</h3><pre class="err">${esc(b.error)}</pre>` : ''}
-      ${b.summary ? `<h3>Result</h3><pre>${esc(b.summary)}</pre>` : ''}` : ''}`;
+      ${b.summary && b.status !== 'question' ? `<h3>Result</h3><pre>${esc(b.summary)}</pre>` : ''}` : ''}`;
 }
 
 function renderChat() {
@@ -363,9 +376,10 @@ function renderChat() {
   const label = (id) => (id ? run.boxes.find((b) => b.id === id)?.label || id : 'chat');
   const items = state.ed.timeline.map((e) => ({ at: e.at, html: e.kind === 'log'
     ? `<div class="ev note">${esc(e.text)}</div>`
-    : `<div class="ev ${e.kind === 'text' ? 'text' : ''}"><span class="tag">${esc(label(e.boxId))}</span>${esc(e.text)}</div>` }));
+    : `<div class="ev ${e.kind === 'text' ? 'text' : ''}"><span class="tag">${esc(label(e.boxId))}</span>${esc(unmark(e.text))}</div>` }));
   for (const m of run.chat || []) {
-    const status = m.status === 'queued' ? 'waits for the current box to end' : m.status === 'working' ? 'the AI is answering…' : '';
+    const status = m.kind === 'answer' ? `your answer to “${label(m.boxId)}”` : m.kind === 'approval' ? `your decision on the push in “${label(m.boxId)}”`
+      : m.status === 'queued' ? 'waits for the current box to end' : m.status === 'working' ? 'the AI is answering…' : '';
     items.push({ at: m.at, html: `<div class="bubble you">${esc(m.text)}${status ? `<div class="meta">${status}</div>` : ''}</div>` });
     if (m.status === 'answered' || m.status === 'failed') {
       items.push({ at: m.answeredAt || m.at, html: `<div class="bubble ai">${esc(m.reply || '')}${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}<div class="meta">${money(m.cost)}</div></div>` });
@@ -375,7 +389,23 @@ function renderChat() {
   log.innerHTML = items.map((x) => x.html).join('') || '<div class="empty">Live activity and your chat with the run show here.</div>';
   if (nearBottom) log.scrollTop = log.scrollHeight;
   const working = run.boxes.find((b) => b.status === 'running');
-  $('#chat-hint').textContent = working ? `Busy with “${working.label}”. Your message is sent when it ends.` : run.sessionId ? 'Talks to the same AI session as the boxes.' : 'Starts the session if no box has run yet.';
+  const asking = run.boxes.find((b) => b.status === 'question');
+  $('#chat-send').textContent = asking ? 'Answer' : 'Send';
+  $('#chat-hint').textContent = asking ? `Your message is the answer to “${asking.label}”.` : working ? `Busy with “${working.label}”. Your message is sent when it ends.` : run.sessionId ? 'Talks to the same AI session as the boxes.' : 'Starts the session if no box has run yet.';
+}
+
+function approvalPanel(r) {
+  const b = r.boxes.find((x) => x.status === 'approval');
+  const list = pushes(b);
+  return `<div class="callout">
+    <b>“${esc(b?.label)}” wants to push.</b> Nothing is pushed until you approve. Read its result (click the box), then decide.
+    ${list.length ? `<pre>${esc(list.join('\n'))}</pre>` : ''}
+    <div class="row">
+      <input id="approval-note" class="grow" placeholder="Note for the AI (optional)">
+      <button class="primary" data-act="approve">Approve push</button>
+      <button data-act="reject">Don't push</button>
+    </div>
+  </div>`;
 }
 
 async function loadTimeline() {
@@ -441,6 +471,9 @@ async function act(name, el) {
     case 'resume':
     case 'stop':
       return api('POST', `/api/runs/${encodeURIComponent(run.id)}/${name}`).catch(fail);
+    case 'approve':
+    case 'reject':
+      return api('POST', `/api/runs/${encodeURIComponent(run.id)}/approve`, { ok: name === 'approve', note: $('#approval-note')?.value || '' }).catch(fail);
     case 'delete-run':
       if (!confirm('Delete this run and its files?')) return;
       return api('DELETE', `/api/runs/${encodeURIComponent(run.id)}`).then(() => (location.hash = '#/')).catch(fail);

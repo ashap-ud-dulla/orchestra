@@ -1,0 +1,18 @@
+#!/bin/sh
+# Orchestra: a push needs your Approve, and a push to main is always refused.
+. "$(dirname "$0")/_orchestra.sh"
+input=$(cat)
+if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exit !found }'; then
+  orchestra_refuse "a push to the main branch is refused, even with Approve."
+fi
+if [ "$ORCHESTRA_ALLOW_PUSH" != "1" ]; then
+  if [ -n "$ORCHESTRA_RUN_DIR" ]; then
+    # Quotes and backslashes would break the JSON line, so drop them.
+    refs=$(printf '%s\n' "$input" | awk '{ print $3 }' | tr '\n' ' ' | tr -d '"\\')
+    remote=$(printf '%s' "$1" | tr -d '"\\')
+    printf '{"at":"%s","source":"git","command":"git push %s %s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$remote" "$refs" >> "$ORCHESTRA_RUN_DIR/approval-requests.jsonl"
+  fi
+  orchestra_refuse "this push needs the user's Approve. Stop, say what you want to push and why, and end your reply with the line ORCHESTRA:APPROVAL."
+fi
+printf '%s\n' "$input" | orchestra_chain pre-push "$@"

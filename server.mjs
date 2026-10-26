@@ -81,6 +81,7 @@ const routes = [
   ['GET', /^\/api\/runs\/([^/]+)\/timeline$/, (_req, [id]) => runner.timeline(id)],
   ['PUT', /^\/api\/runs\/([^/]+)\/boxes$/, async (req, [id]) => runner.updateBoxes(id, (await readBody(req)).boxes)],
   ['POST', /^\/api\/runs\/([^/]+)\/chat$/, async (req, [id]) => runner.chat(id, (await readBody(req)).text)],
+  ['POST', /^\/api\/runs\/([^/]+)\/approve$/, async (req, [id]) => runner.approve(id, await readBody(req))],
   ['POST', /^\/api\/runs\/([^/]+)\/stop$/, (_req, [id]) => runner.stop(id)],
   ['POST', /^\/api\/runs\/([^/]+)\/resume$/, (_req, [id]) => runner.resume(id)],
 ];

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Orchestra: no commits, merges or rebases on the main branch.
+. "$(dirname "$0")/_orchestra.sh"
+[ "$(orchestra_branch)" = "main" ] && orchestra_refuse "work on the main branch is refused. Use the run's work branch."
+orchestra_chain pre-merge-commit "$@"

@@ -1,5 +1,5 @@
 // End-to-end tests with a fake claude. Run: node test/smoke.mjs
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -7,7 +7,8 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { parseFrontmatter } from '../lib/skills-scan.mjs';
-import { childEnv, killOrphan } from '../lib/runner.mjs';
+import { childEnv, guardEnv, killOrphan } from '../lib/runner.mjs';
+import { check, readMark } from '../lib/guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 7171;
@@ -99,6 +100,66 @@ test('orphan kill never hits Orchestra itself or a process that started at anoth
   // This node process is a "node" image, but it started long before this fake spawn time.
   const parent = process.ppid;
   assert.equal(killOrphan(parent, '2000-01-01T00:00:00Z'), false);
+});
+
+test('guard: push and PR need Approve; main and --no-verify are always refused', () => {
+  const v = (command, allow = false) => check('Bash', { command }, { ORCHESTRA_ALLOW_PUSH: allow ? '1' : '0' });
+  for (const c of ['git push', 'git push -u origin feature/x', 'cd repo && git -C x push origin y', 'gh pr create --fill']) {
+    assert.equal(v(c)?.needsApproval, true, c);
+    assert.equal(v(c, true), null, `${c} with Approve`);
+  }
+  for (const c of ['git push origin main', 'git push origin HEAD:main', 'git push origin feature/x --no-verify', 'git checkout main', 'git switch main']) {
+    assert.equal(v(c, true)?.needsApproval, false, `${c} refused even with Approve`);
+  }
+  for (const c of ['git status', 'git log origin/main', 'git merge-base HEAD origin/main', 'git checkout main -- file.txt', 'echo push', 'git commit -m "push later"']) {
+    assert.equal(v(c), null, c);
+  }
+  assert.equal(check('PowerShell', { command: 'git push origin x' }, {})?.needsApproval, true);
+  assert.equal(check('Read', { file_path: 'x' }, {}), null);
+});
+
+test('guard: reply markers are found on the last line and removed', () => {
+  assert.deepEqual(readMark('Which one?\n\n**ORCHESTRA:QUESTION**\n'), { mark: 'ORCHESTRA:QUESTION', text: 'Which one?' });
+  assert.equal(readMark('Want to push.\n`ORCHESTRA:APPROVAL`').mark, 'ORCHESTRA:APPROVAL');
+  assert.equal(readMark('I wrote ORCHESTRA:QUESTION in a file.\nDone.').mark, null);
+});
+
+test('git hooks: push waits for Approve, main is refused, the repo hook still runs', () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-git-'));
+  const git = (args, extra = {}) => spawnSync('git', args, { cwd: path.join(t, 'work'), encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...extra } });
+  try {
+    spawnSync('git', ['init', '-q', '--bare', 'remote.git'], { cwd: t });
+    spawnSync('git', ['clone', '-q', 'remote.git', 'work'], { cwd: t });
+    fs.writeFileSync(path.join(t, 'work', 'a'), 'a');
+    git(['checkout', '-q', '-b', 'main']);
+    git(['add', 'a']);
+    assert.equal(git(['commit', '-qm', 'a']).status, 0);
+    assert.equal(git(['push', '-q', 'origin', 'main']).status, 0, 'no guard yet');
+    git(['checkout', '-q', '-b', 'feature/x']);
+    const guard = (allow) => ({ ...guardEnv('run-test-git', allow), ORCHESTRA_RUN_DIR: t });
+    fs.writeFileSync(path.join(t, 'work', 'b'), 'b');
+    git(['add', 'b']);
+    assert.equal(git(['commit', '-qm', 'b'], guard(false)).status, 0, 'commit on the work branch is fine');
+    const blocked = git(['push', '-q', 'origin', 'feature/x'], guard(false));
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /needs the user's Approve/);
+    assert.match(fs.readFileSync(path.join(t, 'approval-requests.jsonl'), 'utf8'), /refs\/heads\/feature\/x/);
+    assert.equal(git(['push', '-q', 'origin', 'feature/x'], guard(true)).status, 0, 'Approve lets it through');
+    assert.match(git(['push', '-q', 'origin', 'feature/x:main'], guard(true)).stderr, /main branch is refused/);
+    git(['checkout', '-q', 'main']);
+    fs.writeFileSync(path.join(t, 'work', 'c'), 'c');
+    git(['add', 'c']);
+    assert.match(git(['commit', '-qm', 'c'], guard(false)).stderr, /main branch is refused/);
+    git(['checkout', '-q', 'feature/x']);
+    fs.writeFileSync(path.join(t, 'work', '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho REPO-HOOK-RAN >&2\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(t, 'work', 'd'), 'd');
+    git(['add', 'd']);
+    const own = git(['commit', '-qm', 'd'], guard(false));
+    assert.equal(own.status, 0);
+    assert.match(own.stderr, /REPO-HOOK-RAN/);
+  } finally {
+    fs.rmSync(t, { recursive: true, force: true, maxRetries: 5 });
+  }
 });
 
 test('skills list includes Orchestra test skills and team skills', async () => {
@@ -340,6 +401,56 @@ test('the queue: a waiting run frees its slot; a queued run can be taken out', a
   await api('PUT', '/api/settings', { maxRunning: 2 });
   await waitFor(async () => (await getRun(c.id)).status !== 'queued', 'the queued run to start');
   await waitStatus(c.id, 'done');
+  await killServer();
+  await startServer();
+});
+
+test('a box that asks a question waits; your chat answer continues the same box', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_ASK_SKILL: 'orchestra-hello' });
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'ask' } });
+  const asking = await waitStatus(run.id, 'question');
+  assert.equal(asking.boxes[0].status, 'question');
+  assert.equal(asking.boxes[0].question, 'Which color do you like? I suggest blue.', 'the marker line is removed');
+  assert.equal(asking.boxes[1].status, 'pending');
+  const moved = await api('PUT', `/api/runs/${run.id}/boxes`, { boxes: [asking.boxes[1], asking.boxes[0]] });
+  assert.equal(moved.status, 409, 'a box that asks is locked in place');
+  await api('POST', `/api/runs/${run.id}/chat`, { text: 'blue' });
+  const done = await waitStatus(run.id, 'done');
+  assert.deepEqual(calls(done).map((c) => c.prompt), ['/orchestra-hello ask', 'blue', '/orchestra-recap']);
+  assert.ok(calls(done).every((c) => c.rules), 'every turn gets the run rules');
+  assert.equal(done.boxes[0].attempts, 1, 'an answer is not a new try');
+  assert.equal(done.boxes[0].turns, 2);
+  assert.equal(done.chat[0].kind, 'answer');
+  assert.equal((await api('POST', `/api/runs/${run.id}/approve`, { ok: true })).status, 409, 'nothing to approve');
+});
+
+test('a blocked push waits for Approve; Approve lets the box push', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_PUSH_SKILL: 'orchestra-recap' });
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'ship' } });
+  const waiting = await waitStatus(run.id, 'approval');
+  assert.equal(waiting.boxes[1].status, 'approval');
+  assert.match(waiting.boxes[1].approval.requests[0].command, /git push -u origin feature\/x/);
+  await api('POST', `/api/runs/${run.id}/approve`, { ok: true });
+  const done = await waitStatus(run.id, 'done');
+  const c = calls(done);
+  assert.equal(c.at(-2).allowPush, '0', 'the first try had no permission');
+  assert.match(c.at(-1).prompt, /^The user approved the push \(git push -u origin feature\/x\)/);
+  assert.equal(c.at(-1).allowPush, '1');
+  assert.equal(done.boxes[1].summary, 'Pushed feature/x.');
+  assert.equal(done.boxes[1].approvals[0].ok, true);
+});
+
+test('Reject: the box goes on without pushing', async () => {
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'no' } });
+  await waitStatus(run.id, 'approval');
+  await api('POST', `/api/runs/${run.id}/approve`, { ok: false, note: 'not yet' });
+  const done = await waitStatus(run.id, 'done');
+  const last = calls(done).at(-1);
+  assert.match(last.prompt, /^The user did not approve the push\. Do not push\. The user says: not yet/);
+  assert.equal(last.allowPush, '0');
+  assert.equal(done.boxes[1].summary, 'OK, I did not push.');
   await killServer();
   await startServer();
 });

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Orchestra passes this hook straight on to the repo's own one.
+. "$(dirname "$0")/_orchestra.sh"
+orchestra_chain commit-msg "$@"

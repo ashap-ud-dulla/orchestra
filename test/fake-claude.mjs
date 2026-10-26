@@ -1,24 +1,45 @@
 // A stand-in for `claude -p ... --output-format stream-json`. Spends no tokens.
 // FAKE_CLAUDE_SLEEP_MS: wait before the result (to test stop/restart mid-box).
 // FAKE_CLAUDE_FAIL_SKILL: report an error for this skill.
+// FAKE_CLAUDE_ASK_SKILL: this skill asks a question (ends with the ORCHESTRA:QUESTION line).
+// FAKE_CLAUDE_PUSH_SKILL: this skill tries `git push`, through the PreToolUse hook Orchestra passed in --settings.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
-const prompt = args[args.indexOf('-p') + 1] || '';
-const resumeAt = args.indexOf('--resume');
-const sessionId = resumeAt >= 0 ? args[resumeAt + 1] : crypto.randomUUID();
+const arg = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+const prompt = arg('-p') || '';
+const resumed = args.includes('--resume');
+const sessionId = resumed ? arg('--resume') : crypto.randomUUID();
 const skill = (/^\/([\w:.-]+)/.exec(prompt) || [])[1] || '';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
-fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed: resumeAt >= 0, sessionId }) + '\n');
+fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed, sessionId, rules: !!arg('--append-system-prompt'), allowPush: process.env.ORCHESTRA_ALLOW_PUSH }) + '\n');
 out({ type: 'system', subtype: 'init', session_id: sessionId, cwd: process.cwd() });
 out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Skill', input: { skill } }] } });
 
+// Runs the guard hook the way Claude would. Returns true when the push is allowed.
+function tryPush(command) {
+  const hook = JSON.parse(arg('--settings') || '{}').hooks?.PreToolUse?.[0]?.hooks?.[0]?.command;
+  if (!hook) return true;
+  const r = spawnSync(hook, { shell: true, input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }), encoding: 'utf8' });
+  return r.status !== 2;
+}
+
+function reply() {
+  if (process.env.FAKE_CLAUDE_FAIL_SKILL === skill && skill) return { text: `Skill ${skill} hit a problem.`, fail: true };
+  if (process.env.FAKE_CLAUDE_ASK_SKILL === skill && skill) return { text: 'Which color do you like? I suggest blue.\nORCHESTRA:QUESTION' };
+  if ((process.env.FAKE_CLAUDE_PUSH_SKILL === skill && skill) || prompt.startsWith('The user approved')) {
+    return tryPush('git push -u origin feature/x') ? { text: 'Pushed feature/x.' } : { text: 'The push was blocked. I want to push feature/x.\nORCHESTRA:APPROVAL' };
+  }
+  if (prompt.startsWith('The user did not approve')) return { text: 'OK, I did not push.' };
+  return { text: `Ran ${skill}.` };
+}
+
 const sleep = Number(process.env.FAKE_CLAUDE_SLEEP_MS || 0);
 setTimeout(() => {
-  const fail = process.env.FAKE_CLAUDE_FAIL_SKILL === skill;
-  const text = fail ? `Skill ${skill} hit a problem.` : `Ran ${skill}.`;
+  const { text, fail = false } = reply();
   out({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
   out({
     type: 'result', subtype: 'success', is_error: fail, terminal_reason: 'completed', session_id: sessionId,
