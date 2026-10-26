@@ -226,6 +226,87 @@ test('a claude that dies without a result shows its error text', async () => {
   await startServer();
 });
 
+test('a chat message sent while a box works is answered before the next box', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_SLEEP_MS: '1500' });
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'chat' } });
+  await waitFor(async () => (await getRun(run.id)).boxes[0].pid, 'box 1 to start');
+  const sent = await api('POST', `/api/runs/${run.id}/chat`, { text: 'please be brief' });
+  assert.equal(sent.body.chat[0].status, 'queued', 'waits while the box works');
+  const done = await waitStatus(run.id, 'done', 20000);
+  assert.deepEqual(calls(done).map((c) => c.prompt), ['/orchestra-hello chat', 'please be brief', '/orchestra-recap']);
+  assert.ok(calls(done).slice(1).every((c) => c.resumed && c.sessionId === done.sessionId), 'chat uses the run session');
+  assert.equal(done.chat[0].status, 'answered');
+  assert.equal(done.chat[0].reply, 'Ran .');
+  assert.equal(done.cost, 0.03, 'chat cost counts in the run');
+  await killServer();
+  await startServer();
+});
+
+test('a chat message to a finished run is answered right away', async () => {
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'later' } });
+  await waitStatus(run.id, 'done');
+  await api('POST', `/api/runs/${run.id}/chat`, { text: 'what did you do?' });
+  const r = await waitFor(async () => ((await getRun(run.id)).chat[0]?.status === 'answered' ? getRun(run.id) : null), 'chat answer');
+  assert.equal(r.status, 'done');
+  assert.equal(calls(r).at(-1).prompt, 'what did you do?');
+  assert.equal((await api('POST', `/api/runs/${run.id}/chat`, { text: '   ' })).status, 400);
+});
+
+test('a draft can be edited, then started; "wait after" pauses until Continue', async () => {
+  const { body: draft } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'd' }, start: false });
+  assert.equal(draft.status, 'draft');
+  const boxes = [
+    { id: 'hello', skill: 'orchestra-hello', label: 'Hi', waitAfter: true },
+    { id: 'again', skill: 'orchestra-hello', label: 'Again', args: 'twice' },
+  ];
+  const edited = await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes });
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.deepEqual(edited.body.boxes.map((b) => [b.id, b.label, b.status]), [['hello', 'Hi', 'pending'], ['again', 'Again', 'pending']]);
+  await api('POST', `/api/runs/${draft.id}/resume`);
+  const waiting = await waitStatus(draft.id, 'waiting');
+  assert.equal(waiting.waitingAfter, 'hello');
+  assert.deepEqual(waiting.boxes.map((b) => b.status), ['done', 'pending']);
+  // A finished box must keep its place.
+  const bad = await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes: [boxes[1], boxes[0]] });
+  assert.equal(bad.status, 409);
+  await api('POST', `/api/runs/${draft.id}/resume`);
+  const done = await waitStatus(draft.id, 'done');
+  assert.deepEqual(calls(done).map((c) => c.prompt), ['/orchestra-hello d', '/orchestra-hello twice']);
+  assert.equal((await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes })).status, 400, 'a finished run is locked');
+  const { body: tpl } = await api('GET', '/api/templates/demo-hello-recap');
+  assert.equal(tpl.boxes[1].skill, 'orchestra-recap', 'the template did not change');
+});
+
+test('the timeline has log lines and live activity', async () => {
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 't' } });
+  await waitStatus(run.id, 'done');
+  const { body: tl } = await api('GET', `/api/runs/${run.id}/timeline`);
+  assert.ok(tl.some((e) => e.kind === 'log' && /finished/.test(e.text)));
+  assert.ok(tl.some((e) => e.kind === 'tool' && e.boxId === 'recap'));
+  assert.ok(tl.every((e, i) => i === 0 || tl[i - 1].at <= e.at), 'oldest first');
+});
+
+test('a working run cannot be deleted; a finished one can', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_SLEEP_MS: '1500' });
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'del' } });
+  assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 409);
+  await waitStatus(run.id, 'done', 20000);
+  assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 200);
+  assert.equal((await api('GET', `/api/runs/${run.id}`)).status, 404);
+  assert.equal(fs.existsSync(path.join(runsDir, run.id)), false);
+  await killServer();
+  await startServer();
+});
+
+test('the page and its files are served', async () => {
+  for (const p of ['/', '/app.js', '/app.css']) {
+    const res = await fetch(BASE + p);
+    assert.equal(res.status, 200, p);
+  }
+});
+
 test('bad URLs and broken files do not crash the server', async () => {
   const raw = (p) => new Promise((resolve, reject) => {
     http.get({ host: '127.0.0.1', port: PORT, path: p }, (res) => {

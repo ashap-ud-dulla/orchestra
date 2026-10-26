@@ -42,6 +42,7 @@ function broadcast(event, data) {
 runner.on('run', (run) => broadcast('run', run));
 runner.on('log', (e) => broadcast('log', e));
 runner.on('activity', (e) => broadcast('activity', e));
+runner.on('deleted', (e) => broadcast('deleted', e));
 
 // Only this machine's browser may call the API: blocks DNS-rebinding and cross-site requests.
 function allowed(req) {
@@ -67,9 +68,13 @@ const routes = [
   ['GET', /^\/api\/runs$/, () => runner.list()],
   ['POST', /^\/api\/runs$/, async (req) => {
     const body = await readBody(req);
-    return runner.createRun({ templateId: body.templateId, input: body.input });
+    return runner.createRun({ templateId: body.templateId, input: body.input, start: body.start !== false });
   }],
   ['GET', /^\/api\/runs\/([^/]+)$/, (_req, [id]) => runner.get(id) ?? notFound('run')],
+  ['DELETE', /^\/api\/runs\/([^/]+)$/, (_req, [id]) => runner.deleteRun(id)],
+  ['GET', /^\/api\/runs\/([^/]+)\/timeline$/, (_req, [id]) => runner.timeline(id)],
+  ['PUT', /^\/api\/runs\/([^/]+)\/boxes$/, async (req, [id]) => runner.updateBoxes(id, (await readBody(req)).boxes)],
+  ['POST', /^\/api\/runs\/([^/]+)\/chat$/, async (req, [id]) => runner.chat(id, (await readBody(req)).text)],
   ['POST', /^\/api\/runs\/([^/]+)\/stop$/, (_req, [id]) => runner.stop(id)],
   ['POST', /^\/api\/runs\/([^/]+)\/resume$/, (_req, [id]) => runner.resume(id)],
 ];
