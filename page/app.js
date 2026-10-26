@@ -6,6 +6,8 @@ const state = {
   runs: new Map(),
   templates: [],
   skills: [],
+  settings: { maxRunning: 2 },
+  copyFrom: null, // a template to open as "… (copy)" in the editor
   route: { name: 'board' },
   ed: null, // the open editor: { kind: 'run'|'template', id, tpl?, dirty?, sel, timeline, filter }
 };
@@ -81,7 +83,10 @@ async function onRoute() {
   }
   if (name === 'template') {
     let tpl;
-    if (id === 'new') tpl = { id: '', name: 'New template', tracking: true, boxes: [] };
+    if (id === 'new' && state.copyFrom) {
+      tpl = { ...structuredClone(state.copyFrom), id: '', name: `${state.copyFrom.name} (copy)` };
+      state.copyFrom = null;
+    } else if (id === 'new') tpl = { id: '', name: 'New template', tracking: true, boxes: [] };
     else {
       try {
         tpl = await api('GET', `/api/templates/${encodeURIComponent(id)}`);
@@ -97,18 +102,33 @@ async function onRoute() {
 
 // ---------- board ----------
 
+// Queued runs, next first. Same order as the server's queue.
+function queue() {
+  const t = (r) => r.queuedAt || r.createdAt;
+  return [...state.runs.values()].filter((r) => r.status === 'queued').sort((a, b) => t(a).localeCompare(t(b)));
+}
+
 function renderBoard() {
+  // Do not redraw while you change the limit, or the box loses your typing.
+  if ($('#max-running') && document.activeElement === $('#max-running')) return;
   const runs = [...state.runs.values()].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   const cols = [
+    ['Queued', queue()],
     ['Running', runs.filter((r) => r.status === 'running')],
     ['Needs you', runs.filter((r) => NEEDS_YOU.has(r.status))],
     ['Done', runs.filter((r) => r.status === 'done').slice(0, 50)],
   ];
-  $('#view').innerHTML = `<div class="board">${cols.map(([title, list]) => `
+  $('#view').innerHTML = `<div class="board-wrap">
+    <div class="board-bar">
+      <label class="check">Runs working at once <input type="number" id="max-running" min="1" max="20" value="${state.settings.maxRunning}"></label>
+      <span class="muted small">More runs wait in Queued and start by themselves, oldest first. Runs that wait for you do not count.</span>
+    </div>
+    <div class="board">${cols.map(([title, list]) => `
     <section class="col">
       <h3><span>${title}</span><span>${list.length}</span></h3>
       <div class="cards">${list.map(card).join('') || '<div class="empty">Nothing here.</div>'}</div>
-    </section>`).join('')}</div>`;
+    </section>`).join('')}</div>
+  </div>`;
 }
 
 function card(r) {
@@ -120,6 +140,7 @@ function card(r) {
   else if (r.status === 'stopped') why = '<div class="why">Stopped by you</div>';
   else if (r.status === 'draft') why = '<div class="why">Draft: check the boxes, then press Start</div>';
   else if (working) why = `<div class="why muted">Working on “${esc(working.label)}”</div>`;
+  else if (r.status === 'queued') why = `<div class="why muted">Number ${queue().indexOf(r) + 1} in line</div>`;
   const queued = (r.chat || []).filter((m) => m.status === 'queued' || m.status === 'working').length;
   return `<a class="card" href="#/run/${encodeURIComponent(r.id)}">
     <div class="title"><span>${esc(r.templateName)}</span><span class="chip ${esc(r.status)}">${esc(r.status)}</span></div>
@@ -141,6 +162,7 @@ async function renderTemplates() {
         <div class="grow"><b>${esc(t.name)}</b><div class="muted small">${t.boxes.map((b) => esc(b.label || b.skill)).join(' → ')}</div></div>
         <span class="chip ${t.tracking === false ? 'draft' : 'done'}">tracking ${t.tracking === false ? 'off' : 'on'}</span>
         <a href="#/template/${encodeURIComponent(t.id)}"><button>Edit</button></a>
+        <button data-act="duplicate-template" data-id="${esc(t.id)}">Duplicate</button>
         <button data-start="${esc(t.id)}">Start…</button>
       </div>`).join('') || '<div class="empty">No templates yet.</div>'}</div>
   </div>`;
@@ -181,8 +203,10 @@ function mountEditor() {
     </aside>
     <section class="center">
       <div class="head" id="head"></div>
-      <div class="canvas" id="canvas"></div>
-      <div class="inspector" id="inspector"></div>
+      <div class="work">
+        <div class="canvas" id="canvas"></div>
+        <div class="inspector" id="inspector"></div>
+      </div>
     </section>
     ${isRun ? `<aside class="chat">
       <div class="log" id="chat-log"></div>
@@ -255,11 +279,13 @@ function renderHead() {
       ${r.status === 'waiting' ? act('resume', 'Continue', 'primary') : ''}
       ${['stopped', 'failed'].includes(r.status) ? act('resume', 'Resume', 'primary') : ''}
       ${r.status === 'running' ? act('stop', 'Stop') : ''}
+      ${r.status === 'queued' ? act('stop', 'Take out of queue') : ''}
       ${act('save-as-template', 'Save as template')}
       ${r.status !== 'running' ? act('delete-run', 'Delete', 'danger') : ''}
     </div>
     ${r.input?.text ? `<div class="input">${esc(r.input.text)}</div>` : ''}
     ${r.status === 'waiting' ? `<div class="small" style="color:var(--wait)">Waiting for you after “${esc(waitBox?.label || r.waitingAfter)}”. Check its result, then press Continue.</div>` : ''}
+    ${r.status === 'queued' ? `<div class="small muted">Number ${queue().indexOf(r) + 1} in line. It starts by itself when a slot is free (${state.settings.maxRunning} at once).</div>` : ''}
     ${r.error ? `<div class="err">${esc(r.error)}</div>` : ''}`;
 }
 
@@ -307,8 +333,8 @@ function renderInspector() {
   const soft = canEdit() && (free || b.status === 'running'); // label and "wait after" only
   el.innerHTML = `
     <div class="row" style="margin-bottom:10px"><h2 class="grow" style="margin:0">${esc(b.label || b.skill)}</h2>
-      <button class="small" data-act="move-left" ${free && i > locked ? '' : 'disabled'}>← Move</button>
-      <button class="small" data-act="move-right" ${free && i < edBoxes().length - 1 ? '' : 'disabled'}>Move →</button>
+      <button class="small" data-act="move-up" ${free && i > locked ? '' : 'disabled'}>↑ Move up</button>
+      <button class="small" data-act="move-down" ${free && i < edBoxes().length - 1 ? '' : 'disabled'}>Move down ↓</button>
       <button class="small danger" data-act="remove-box" ${free ? '' : 'disabled'}>Remove</button>
     </div>
     <div class="grid">
@@ -446,13 +472,21 @@ async function act(name, el) {
       }
       return refreshEditor();
     }
+    case 'duplicate-template':
+      try {
+        state.copyFrom = await api('GET', `/api/templates/${encodeURIComponent(el.dataset.id)}`);
+        location.hash = '#/template/new';
+      } catch (err) {
+        fail(err);
+      }
+      return;
     case 'delete-template':
       if (!confirm(`Delete template “${ed.tpl.name}”? Runs made from it stay.`)) return;
       return api('DELETE', `/api/templates/${ed.tpl.id}`).then(() => (location.hash = '#/templates')).catch(fail);
-    case 'move-left':
-    case 'move-right': {
+    case 'move-up':
+    case 'move-down': {
       const i = edBoxes().findIndex((b) => b.id === ed.sel);
-      return moveBox(ed.sel, name === 'move-left' ? i - 1 : i + 2);
+      return moveBox(ed.sel, name === 'move-up' ? i - 1 : i + 2);
     }
     case 'remove-box': {
       const boxes = edBoxes().filter((b) => b.id !== ed.sel);
@@ -505,6 +539,17 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'max-running') {
+    const el = e.target;
+    api('PUT', '/api/settings', { maxRunning: Number(el.value) })
+      .then((s) => (state.settings = s))
+      .catch((err) => {
+        el.value = state.settings.maxRunning;
+        fail(err);
+      })
+      .finally(() => el.blur());
+    return;
+  }
   if (!state.ed) return;
   const field = e.target.dataset?.field;
   if (field) return updateSelected(field, e.target.type === 'checkbox' ? e.target.checked : e.target.value);
@@ -596,13 +641,19 @@ function connect() {
   es.onopen = () => conn.classList.add('on');
   es.onerror = () => conn.classList.remove('on'); // EventSource reconnects by itself
   es.addEventListener('hello', (e) => {
+    const hello = JSON.parse(e.data);
+    if (hello.settings) state.settings = hello.settings;
     state.runs.clear();
-    for (const r of JSON.parse(e.data).runs) state.runs.set(r.id, r);
+    for (const r of hello.runs) state.runs.set(r.id, r);
     if (state.route.name === 'board') renderBoard();
     if (state.ed?.kind === 'run') {
       refreshEditor();
       loadTimeline(); // catch up on what happened while disconnected
     }
+  });
+  es.addEventListener('settings', (e) => {
+    state.settings = JSON.parse(e.data);
+    if (state.route.name === 'board') renderBoard();
   });
   es.addEventListener('run', (e) => {
     const r = JSON.parse(e.data);

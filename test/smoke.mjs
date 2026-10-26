@@ -16,7 +16,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-test-'));
 const dataDir = path.join(tmp, 'data');
 const runsDir = path.join(tmp, 'runs');
 fs.mkdirSync(path.join(dataDir, 'templates'), { recursive: true });
-fs.copyFileSync(path.join(ROOT, 'data/templates/demo-hello-recap.json'), path.join(dataDir, 'templates/demo-hello-recap.json'));
+fs.copyFileSync(path.join(ROOT, 'test/fixtures/demo-hello-recap.json'), path.join(dataDir, 'templates/demo-hello-recap.json'));
 
 let server = null;
 function startServer(extraEnv = {}) {
@@ -296,6 +296,50 @@ test('a working run cannot be deleted; a finished one can', async () => {
   assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 200);
   assert.equal((await api('GET', `/api/runs/${run.id}`)).status, 404);
   assert.equal(fs.existsSync(path.join(runsDir, run.id)), false);
+  await killServer();
+  await startServer();
+});
+
+test('the queue: only the limit works at once, first in first out', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_SLEEP_MS: '800' });
+  assert.equal((await api('PUT', '/api/settings', { maxRunning: 0 })).status, 400);
+  assert.equal((await api('PUT', '/api/settings', { maxRunning: 1 })).body.maxRunning, 1);
+  const ids = [];
+  for (const t of ['q1', 'q2', 'q3']) ids.push((await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: t } })).body.id);
+  let most = 0;
+  const started = [];
+  await waitFor(async () => {
+    const runs = await Promise.all(ids.map(getRun));
+    most = Math.max(most, runs.filter((r) => r.status === 'running').length);
+    for (const r of runs) if (r.status !== 'queued' && !started.includes(r.id)) started.push(r.id);
+    return runs.every((r) => r.status === 'done');
+  }, 'all three runs to finish', 30000);
+  assert.equal(most, 1, 'never more than the limit');
+  assert.deepEqual(started, ids, 'oldest first');
+});
+
+test('the queue: a waiting run frees its slot; a queued run can be taken out', async () => {
+  const { body: gate } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'g' }, start: false });
+  await api('PUT', `/api/runs/${gate.id}/boxes`, { boxes: [{ id: 'hello', skill: 'orchestra-hello', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }] });
+  await api('POST', `/api/runs/${gate.id}/resume`);
+  await waitStatus(gate.id, 'waiting');
+  const { body: a } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'a' } });
+  const { body: b } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'b' } });
+  assert.equal(a.status, 'running', 'the waiting run does not hold the slot');
+  assert.equal(b.status, 'queued');
+  await api('POST', `/api/runs/${b.id}/stop`);
+  assert.equal((await getRun(b.id)).status, 'stopped');
+  await waitStatus(a.id, 'done');
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal((await getRun(b.id)).status, 'stopped', 'a run taken out of the queue stays out');
+  // Raising the limit starts queued runs right away.
+  await api('POST', `/api/runs/${b.id}/resume`);
+  const { body: c } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'c' } });
+  assert.equal(c.status, 'queued');
+  await api('PUT', '/api/settings', { maxRunning: 2 });
+  await waitFor(async () => (await getRun(c.id)).status !== 'queued', 'the queued run to start');
+  await waitStatus(c.id, 'done');
   await killServer();
   await startServer();
 });

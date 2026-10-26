@@ -65,6 +65,12 @@ const routes = [
   ['GET', /^\/api\/templates\/([^/]+)$/, async (_req, [id]) => (await getTemplate(id)) ?? notFound('template')],
   ['PUT', /^\/api\/templates\/([^/]+)$/, async (req, [id]) => saveTemplate({ ...(await readBody(req)), id })],
   ['DELETE', /^\/api\/templates\/([^/]+)$/, async (_req, [id]) => (await deleteTemplate(id), { ok: true })],
+  ['GET', /^\/api\/settings$/, () => runner.getSettings()],
+  ['PUT', /^\/api\/settings$/, async (req) => {
+    const s = await runner.setSettings(await readBody(req));
+    broadcast('settings', s);
+    return s;
+  }],
   ['GET', /^\/api\/runs$/, () => runner.list()],
   ['POST', /^\/api\/runs$/, async (req) => {
     const body = await readBody(req);
@@ -120,7 +126,7 @@ async function handle(req, res) {
 
   if (pathname === '/api/events' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
-    res.write(`event: hello\ndata: ${JSON.stringify({ runs: runner.list() })}\n\n`);
+    res.write(`event: hello\ndata: ${JSON.stringify({ runs: runner.list(), settings: runner.getSettings() })}\n\n`);
     clients.add(res);
     req.on('close', () => clients.delete(res));
     return;
