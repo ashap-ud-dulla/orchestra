@@ -7,7 +7,9 @@ import { scanSkills } from './lib/skills-scan.mjs';
 import { setMark, offProblems, OFF_HELP } from './lib/tracking.mjs';
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from './lib/store.mjs';
 import { Runner } from './lib/runner.mjs';
-import { listRepos, branchesFor, branchNameFor } from './lib/workspace.mjs';
+import { computeStats } from './lib/stats.mjs';
+import { listSuggestions, decide, getInstructions, saveInstructions } from './lib/learn.mjs';
+import { listRepos } from './lib/workspace.mjs';
 
 const runner = new Runner();
 const clients = new Set(); // open SSE connections
@@ -45,6 +47,7 @@ runner.on('run', (run) => broadcast('run', run));
 runner.on('log', (e) => broadcast('log', e));
 runner.on('activity', (e) => broadcast('activity', e));
 runner.on('deleted', (e) => broadcast('deleted', e));
+runner.on('suggestions', async () => broadcast('suggestions', await listSuggestions()));
 
 // Only this machine's browser may call the API: blocks DNS-rebinding and cross-site requests.
 function allowed(req) {
@@ -88,9 +91,8 @@ const routes = [
     return s;
   }],
   ['GET', /^\/api\/repos$/, (req) => listRepos({ fresh: query(req).get('fresh') === '1' })],
-  ['GET', /^\/api\/repos\/([\w-]+)\/branches$/, (_req, [token]) => branchesFor(token)],
-  ['GET', /^\/api\/branch-name$/, (req) => ({ branch: branchNameFor(query(req).get('input'), 'run-000000') })],
   ['GET', /^\/api\/runs$/, () => runner.list()],
+  ['GET', /^\/api\/stats$/, () => computeStats(runner.list())],
   ['POST', /^\/api\/runs$/, async (req) => {
     const body = await readBody(req);
     return runner.createRun({ templateId: body.templateId, input: body.input, start: body.start !== false, repos: body.repos });
@@ -100,6 +102,21 @@ const routes = [
   ['GET', /^\/api\/runs\/([^/]+)\/timeline$/, (_req, [id]) => runner.timeline(id)],
   ['PUT', /^\/api\/runs\/([^/]+)\/boxes$/, async (req, [id]) => runner.updateBoxes(id, (await readBody(req)).boxes)],
   ['POST', /^\/api\/runs\/([^/]+)\/chat$/, async (req, [id]) => runner.chat(id, (await readBody(req)).text)],
+  ['POST', /^\/api\/runs\/([^/]+)\/walkthrough$/, (_req, [id]) => runner.walkthrough(id)],
+  ['POST', /^\/api\/runs\/([^/]+)\/learn$/, (_req, [id]) => {
+    const run = runner.get(id) ?? notFound('run');
+    runner.canLearn(run);
+    runner.learn(id).catch(() => {}); // a claude call; the run shows how it went
+    return run;
+  }],
+  ['GET', /^\/api\/suggestions$/, () => listSuggestions()],
+  ['POST', /^\/api\/suggestions\/([^/]+)$/, async (req, [id]) => {
+    const s = await decide(id, await readBody(req));
+    broadcast('suggestions', await listSuggestions());
+    return s;
+  }],
+  ['GET', /^\/api\/instructions$/, async () => ({ text: await getInstructions() })],
+  ['PUT', /^\/api\/instructions$/, async (req) => ({ text: await saveInstructions((await readBody(req)).text) })],
   ['POST', /^\/api\/runs\/([^/]+)\/approve$/, async (req, [id]) => runner.approve(id, await readBody(req))],
   ['POST', /^\/api\/runs\/([^/]+)\/stop$/, (_req, [id]) => runner.stop(id)],
   ['POST', /^\/api\/runs\/([^/]+)\/resume$/, (_req, [id]) => runner.resume(id)],

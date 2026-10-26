@@ -7,7 +7,8 @@ const state = {
   templates: [],
   skills: [],
   repos: [], // ITP repos a run can get worktrees of
-  settings: { maxRunning: 2 },
+  settings: { maxRunning: 2, learn: true },
+  suggestions: [], // lessons from runs: rules and workflow changes to accept or reject
   copyFrom: null, // a template to open as "… (copy)" in the editor
   route: { name: 'board' },
   ed: null, // the open editor: { kind: 'run'|'template', id, tpl?, dirty?, sel, timeline, filter }
@@ -68,6 +69,8 @@ function parseRoute() {
   if (parts[0] === 'template' && parts[1]) return { name: 'template', id: parts[1] };
   if (parts[0] === 'templates') return { name: 'templates' };
   if (parts[0] === 'skills') return { name: 'skills' };
+  if (parts[0] === 'stats') return { name: 'stats' };
+  if (parts[0] === 'learn') return { name: 'learn' };
   return { name: 'board' };
 }
 
@@ -81,6 +84,8 @@ async function onRoute() {
   if (name === 'board') return renderBoard();
   if (name === 'templates') return renderTemplates();
   if (name === 'skills') return renderSkillMarks();
+  if (name === 'stats') return renderStats();
+  if (name === 'learn') return renderLearn();
   if (name === 'run') {
     state.ed = { kind: 'run', id, sel: null, timeline: [], filter: '' };
     mountEditor();
@@ -220,6 +225,106 @@ function renderSkillMarkRows() {
     </div>`).join('') || '<div class="empty">No skills match.</div>';
 }
 
+// ---------- stats: spend, history, and which boxes fail ----------
+
+async function renderStats() {
+  let s;
+  try {
+    s = await api('GET', '/api/stats');
+  } catch (err) {
+    $('#view').innerHTML = `<div class="page err">${esc(err.message)}</div>`;
+    return;
+  }
+  if (state.route.name !== 'stats') return;
+  const t = s.totals;
+  const dur = (ms) => (ms == null ? '–' : duration(ms));
+  $('#view').innerHTML = `<div class="page wide">
+    <div class="row"><h1 class="grow">Stats</h1><button data-act="refresh-stats">Refresh</button></div>
+    <p class="summary-line">Spent <b>${money(t.costToday)}</b> today · <b>${money(t.cost7d)}</b> in the last 7 days · <b>${money(t.cost)}</b> in all.
+      ${t.runs} run${t.runs === 1 ? '' : 's'}: ${t.done} done, ${t.failed} failed now.</p>
+
+    <h2>Templates</h2>
+    <table class="stats"><thead><tr><th>Template</th><th class="num">Runs</th><th class="num">Done</th><th class="num">Failed now</th><th class="num">Avg cost (done)</th><th class="num">Avg AI time (done)</th><th class="num">Total cost</th></tr></thead>
+    <tbody>${s.templates.map((x) => `<tr><td>${esc(x.name || x.id)}</td><td class="num">${x.runs}</td><td class="num">${x.done}</td><td class="num">${x.failed}</td><td class="num">${x.done ? money(x.avgCost) : '–'}</td><td class="num">${dur(x.avgWorkMs)}</td><td class="num">${money(x.cost)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No runs yet.</td></tr>'}</tbody></table>
+
+    <h2>Skills (boxes)</h2>
+    <p class="muted small">Most failures first. A failure is one try that ended in an error. AI time counts only the boxes that finished.</p>
+    <table class="stats"><thead><tr><th>Skill</th><th class="num">Boxes</th><th class="num">Tries</th><th class="num">Failures</th><th class="num">Avg time</th><th class="num">Avg cost</th><th class="num">Total cost</th><th>Last error</th></tr></thead>
+    <tbody>${s.skills.map((x) => `<tr><td>/${esc(x.skill)}</td><td class="num">${x.boxes}</td><td class="num">${x.tries}</td><td class="num ${x.failures ? 'bad' : ''}">${x.failures}</td><td class="num">${dur(x.avgMs)}</td><td class="num">${x.done ? money(x.avgCost) : '–'}</td><td class="num">${money(x.cost)}</td>
+      <td class="small">${x.lastError ? `<a href="#/run/${encodeURIComponent(x.lastErrorRun)}" title="${esc(x.lastError)}">${esc(x.lastError.slice(0, 70))}</a>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">No boxes have run yet.</td></tr>'}</tbody></table>
+
+    <h2>History</h2>
+    <table class="stats"><thead><tr><th>Started</th><th>Template</th><th>Input</th><th>Boxes</th><th>Status</th><th class="num">AI time</th><th class="num">Cost</th></tr></thead>
+    <tbody>${s.history.map((r) => `<tr class="link-row" data-href="#/run/${encodeURIComponent(r.id)}"><td class="small">${esc(new Date(r.createdAt).toLocaleString())}</td><td>${esc(r.templateName)}${r.tracking ? '' : ' <span class="chip draft">tracking off</span>'}</td><td class="small">${esc(r.input || '–')}</td>
+      <td><span class="dots">${r.boxes.map((b) => `<span class="dot ${esc(b)}" title="${esc(b)}"></span>`).join('')}</span></td><td><span class="chip ${esc(r.status)}">${esc(r.status)}</span></td><td class="num">${dur(r.workMs)}</td><td class="num">${money(r.cost)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No runs yet.</td></tr>'}</tbody></table>
+  </div>`;
+}
+
+// ---------- learn: lessons from runs, and your rules ----------
+
+function learnBadge() {
+  const n = state.suggestions.filter((s) => s.status === 'new').length;
+  const el = $('#learn-count');
+  el.hidden = !n;
+  el.textContent = n;
+}
+
+async function renderLearn() {
+  // Do not redraw under the cursor while you edit a rule.
+  if ($('#view .learn') && document.activeElement?.closest?.('.learn textarea')) return;
+  let rules = '';
+  try {
+    rules = (await api('GET', '/api/instructions')).text;
+  } catch {}
+  if (state.route.name !== 'learn') return;
+  const fresh = state.suggestions.filter((s) => s.status === 'new').sort((a, b) => b.at.localeCompare(a.at));
+  const old = state.suggestions.filter((s) => s.status !== 'new').sort((a, b) => (b.decidedAt || '').localeCompare(a.decidedAt || '')).slice(0, 30);
+  const from = (s) => `<a href="#/run/${encodeURIComponent(s.runId)}">${esc(s.templateName || 'run')}</a>`;
+  $('#view').innerHTML = `<div class="page learn">
+    <div class="row"><h1 class="grow">Learn</h1>
+      <label class="check small"><input type="checkbox" id="learn-auto" ${state.settings.learn !== false ? 'checked' : ''}> Look for lessons after each finished run</label></div>
+    <p class="muted small">After a run, a fresh AI reads what you said at the gates, what failed and where you stopped it. It suggests <b>rules</b> (how the AI should work for you) and <b>workflow changes</b> (to your templates). Accepted rules are added to your rules below, and every later run follows them.</p>
+
+    <h2>New suggestions ${fresh.length ? `(${fresh.length})` : ''}</h2>
+    <div class="list">${fresh.map((s) => `
+      <div class="item sug" data-sug="${esc(s.id)}">
+        <div class="grow">
+          <div class="row small"><span class="chip ${s.kind === 'rule' ? 'running' : 'waiting'}">${s.kind === 'rule' ? 'rule' : 'workflow change'}</span><span class="muted">from ${from(s)} · ${ago(s.at)}</span></div>
+          ${s.kind === 'rule' ? `<textarea rows="2" data-sug-text>${esc(s.text)}</textarea>` : `<div class="sug-text">${esc(s.text)}</div>`}
+          ${s.why ? `<div class="muted small">Why: ${esc(s.why)}</div>` : ''}
+        </div>
+        <div class="col-btns">
+          <button class="primary" data-act="accept-sug">${s.kind === 'rule' ? 'Add to my rules' : 'Accept'}</button>
+          ${s.kind === 'workflow' && s.templateId ? `<a href="#/template/${encodeURIComponent(s.templateId)}"><button>Open template</button></a>` : ''}
+          <button data-act="reject-sug">Reject</button>
+        </div>
+      </div>`).join('') || '<div class="empty">No new suggestions. They show up here after runs where you answered, approved, chatted, or something failed.</div>'}</div>
+
+    <h2>Your rules</h2>
+    <p class="muted small">Every run follows these. Saved in <code>data/instructions.md</code>. One rule per line works best.</p>
+    <textarea id="my-rules" rows="8" placeholder="- Always ...">${esc(rules)}</textarea>
+    <div class="row"><span class="grow"></span><button data-act="save-rules">Save rules</button></div>
+
+    ${old.length ? `<h2>Decided</h2><div class="list">${old.map((s) => `
+      <div class="item small"><span class="chip ${s.status === 'accepted' ? 'done' : 'stopped'}">${esc(s.status)}</span><span class="grow">${esc(s.text)}</span><span class="muted">${s.kind === 'rule' ? 'rule' : 'workflow'} · ${from(s)}</span></div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+async function decideSuggestion(el, action) {
+  const box = el.closest('[data-sug]');
+  const body = { action };
+  const t = $('[data-sug-text]', box);
+  if (t && action === 'accept') body.text = t.value;
+  try {
+    await api('POST', `/api/suggestions/${encodeURIComponent(box.dataset.sug)}`, body);
+    state.suggestions = await api('GET', '/api/suggestions');
+    learnBadge();
+    renderLearn();
+  } catch (err) {
+    fail(err);
+  }
+}
+
 // Tracking is OFF for the open template or run.
 function trackingOff() {
   if (!state.ed) return false;
@@ -345,6 +450,8 @@ function renderHead() {
       ${['stopped', 'failed'].includes(r.status) ? act('resume', 'Resume', 'primary') : ''}
       ${r.status === 'running' ? act('stop', 'Stop') : ''}
       ${r.status === 'queued' ? act('stop', 'Take out of queue') : ''}
+      ${r.sessionId && !['running', 'queued'].includes(r.status) ? `<button data-act="learn" ${r.learn?.status === 'working' ? 'disabled' : ''} title="A fresh AI reads this run and suggests rules and workflow changes. You accept or reject them on the Learn page.">Suggest lessons</button>` : ''}
+      ${r.sessionId ? `<button data-act="walkthrough" title="The run's AI explains the code it changed: the patterns used and why they fit. Answered in the chat.">Explain the code</button>` : ''}
       ${act('save-as-template', 'Save as template')}
       ${r.status !== 'running' ? act('delete-run', 'Delete', 'danger') : ''}
     </div>
@@ -354,7 +461,8 @@ function renderHead() {
     ${r.status === 'approval' ? approvalPanel(r) : ''}
     ${r.status === 'waiting' ? `<div class="small" style="color:var(--wait)">Waiting for you after “${esc(waitBox?.label || r.waitingAfter)}”. Check its result, then press Continue.</div>` : ''}
     ${r.status === 'queued' ? `<div class="small muted">Number ${queue().indexOf(r) + 1} in line. It starts by itself when a slot is free (${state.settings.maxRunning} at once).</div>` : ''}
-    ${r.error ? `<div class="err">${esc(r.error)}</div>` : ''}`;
+    ${r.error ? `<div class="err">${esc(r.error)}</div>` : ''}
+    ${learnLine(r)}`;
 }
 
 function renderCanvas() {
@@ -372,7 +480,7 @@ function renderCanvas() {
     // With tracking OFF, a box whose skill writes to Teamspace or the vault cannot run.
     const blocked = off && b.status !== 'done' && tracksSkill(b.skill);
     return `<div class="node ${esc(status)} ${gate || asks ? 'gate' : ''} ${blocked ? 'blocked' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}" ${blocked ? 'title="Tracking is OFF and this skill writes to Teamspace or the vault"' : ''}>
-      ${b.waitAfter || b.usesApp ? `<span class="pause">${[b.waitAfter && '<span title="Waits for you after this box">wait</span>', b.usesApp && '<span title="Starts the app; takes turns with other runs">app</span>'].filter(Boolean).join(' · ')}</span>` : ''}
+      ${b.waitAfter || b.usesApp || b.walkthrough ? `<span class="pause">${[b.waitAfter && '<span title="Waits for you after this box">wait</span>', b.usesApp && '<span title="Starts the app; takes turns with other runs">app</span>', b.walkthrough && '<span title="Explains the code after this box">explain</span>'].filter(Boolean).join(' · ')}</span>` : ''}
       <div class="label">${esc(b.label || b.skill)}</div>
       <div class="skillname">/${esc(b.skill)}${b.args ? ' ' + esc(b.args.slice(0, 40)) : ''}</div>
       <div class="foot">${run ? `<span class="chip ${esc(gate ? 'waiting' : status)}">${esc(gate ? 'your turn' : b.status === 'approval' ? 'approve?' : status)}</span><span>${b.cost ? money(b.cost) : ''}${b.attempts > 1 ? ` · try ${b.attempts}` : ''}</span>` : '<span></span>'}</div>
@@ -415,6 +523,7 @@ function renderInspector() {
       <label class="wide">Extra text for the skill <textarea data-field="args" rows="2" ${free ? '' : 'disabled'} placeholder="Added after /${esc(b.skill)}">${esc(b.args || '')}</textarea></label>
       <label class="check wide"><input type="checkbox" data-field="waitAfter" ${b.waitAfter ? 'checked' : ''} ${soft ? '' : 'disabled'}> Wait for me after this box</label>
       <label class="check wide"><input type="checkbox" data-field="usesApp" ${b.usesApp ? 'checked' : ''} ${soft ? '' : 'disabled'}> Starts the app to test it (takes turns with other runs)</label>
+      <label class="check wide"><input type="checkbox" data-field="walkthrough" ${b.walkthrough ? 'checked' : ''} ${soft ? '' : 'disabled'}> Explain the code after this box (a walk-through for learning, in the chat)</label>
     </div>
     ${trackingOff() && b.status !== 'done' && tracksSkill(b.skill) ? `<div class="callout bad small"><div>Tracking is OFF, and /${esc(b.skill)} writes to Teamspace or the vault. This box cannot run. Remove it, turn tracking on, or <a href="#/skills">correct the skill’s mark</a>.</div></div>` : ''}
     ${run ? `
@@ -429,6 +538,7 @@ function renderInspector() {
       ${b.status === 'approval' ? `<h3>Wants to push</h3><pre>${esc(pushes(b).join('\n') || '(see its result)')}</pre>` : ''}
       ${(b.approvals || []).length ? `<h3>Your decisions</h3><pre>${esc(b.approvals.map((a) => `${a.ok ? 'Approved' : 'Not approved'}${a.note ? `: ${a.note}` : ''}`).join('\n'))}</pre>` : ''}
       ${b.error ? `<h3>Error</h3><pre class="err">${esc(b.error)}</pre>` : ''}
+      ${b.didWhy && b.status === 'done' ? `<h3>What I did and why</h3><div class="why-note">${esc(b.didWhy)}</div>` : ''}
       ${b.summary && b.status !== 'question' ? `<h3>Result</h3><pre>${esc(b.summary)}</pre>` : ''}` : ''}`;
 }
 
@@ -444,7 +554,9 @@ function renderChat() {
   for (const m of run.chat || []) {
     const status = m.kind === 'answer' ? `your answer to “${label(m.boxId)}”` : m.kind === 'approval' ? `your decision on the push in “${label(m.boxId)}”`
       : m.status === 'queued' ? 'waits for the current box to end' : m.status === 'working' ? 'the AI is answering…' : '';
-    items.push({ at: m.at, html: `<div class="bubble you">${esc(m.text)}${status ? `<div class="meta">${status}</div>` : ''}</div>` });
+    // The walk-through prompt is long and always the same; show what it is instead.
+    const text = m.kind === 'walkthrough' ? `Explain the code${m.boxId ? ` (after “${label(m.boxId)}”)` : ''}: the patterns used and why they fit.` : m.text;
+    items.push({ at: m.at, html: `<div class="bubble you ${m.kind === 'walkthrough' ? 'auto' : ''}">${esc(text)}${status ? `<div class="meta">${status}</div>` : ''}</div>` });
     if (m.status === 'answered' || m.status === 'failed') {
       items.push({ at: m.answeredAt || m.at, html: `<div class="bubble ai">${esc(m.reply || '')}${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}<div class="meta">${money(m.cost)}</div></div>` });
     }
@@ -456,6 +568,14 @@ function renderChat() {
   const asking = run.boxes.find((b) => b.status === 'question');
   $('#chat-send').textContent = asking ? 'Answer' : 'Send';
   $('#chat-hint').textContent = asking ? `Your message is the answer to “${asking.label}”.` : working ? `Busy with “${working.label}”. Your message is sent when it ends.` : run.sessionId ? 'Talks to the same AI session as the boxes.' : 'Starts the session if no box has run yet.';
+}
+
+function learnLine(r) {
+  const l = r.learn;
+  if (!l) return '';
+  if (l.status === 'working') return '<div class="small muted">Looking for lessons in this run…</div>';
+  if (l.status === 'failed') return `<div class="small err">Looking for lessons failed: ${esc(l.error || '')}</div>`;
+  return `<div class="small muted">${l.count ? `<a href="#/learn">${l.count} lesson${l.count > 1 ? 's' : ''} suggested</a>` : 'No lessons found'} (${money(l.cost)}).</div>`;
 }
 
 function approvalPanel(r) {
@@ -486,7 +606,7 @@ async function loadTimeline() {
 // ---------- editing boxes ----------
 
 async function commitBoxes(boxes) {
-  const plain = boxes.map(({ id, skill, label, args, waitAfter, usesApp }) => ({ id, skill, label, args: args || '', waitAfter: !!waitAfter, usesApp: !!usesApp }));
+  const plain = boxes.map(({ id, skill, label, args, waitAfter, usesApp, walkthrough }) => ({ id, skill, label, args: args || '', waitAfter: !!waitAfter, usesApp: !!usesApp, walkthrough: !!walkthrough }));
   if (state.ed.kind === 'template') {
     state.ed.tpl.boxes = plain;
     state.ed.dirty = true;
@@ -534,7 +654,18 @@ async function act(name, el) {
   switch (name) {
     case 'resume':
     case 'stop':
+    case 'walkthrough':
       return api('POST', `/api/runs/${encodeURIComponent(run.id)}/${name}`).catch(fail);
+    case 'refresh-stats':
+      return renderStats();
+    case 'learn':
+      return api('POST', `/api/runs/${encodeURIComponent(run.id)}/learn`).catch(fail);
+    case 'accept-sug':
+      return decideSuggestion(el, 'accept');
+    case 'reject-sug':
+      return decideSuggestion(el, 'reject');
+    case 'save-rules':
+      return api('PUT', '/api/instructions', { text: $('#my-rules').value }).then(() => alert('Rules saved. New turns of every run follow them.')).catch(fail);
     case 'approve':
     case 'reject':
       return api('POST', `/api/runs/${encodeURIComponent(run.id)}/approve`, { ok: name === 'approve', note: $('#approval-note')?.value || '' }).catch(fail);
@@ -561,7 +692,7 @@ async function act(name, el) {
       if (!n) return;
       await loadTemplates();
       const id = slug(n, new Set(state.templates.map((t) => t.id)));
-      const boxes = run.boxes.map(({ id, skill, label, args, waitAfter, usesApp }) => ({ id, skill, label, args, waitAfter, usesApp: !!usesApp }));
+      const boxes = run.boxes.map(({ id, skill, label, args, waitAfter, usesApp, walkthrough }) => ({ id, skill, label, args, waitAfter, usesApp: !!usesApp, walkthrough: !!walkthrough }));
       const repos = (run.repoPlan || []).map((p) => p.token);
       return api('PUT', `/api/templates/${id}`, { id, name: n, tracking: run.tracking, repos, boxes })
         .then(() => alert(`Saved as template “${n}”.`)).catch(fail);
@@ -612,16 +743,6 @@ async function act(name, el) {
 // The ITP repos that are cloned on this PC, so a run can get worktrees of them.
 const cloned = () => state.repos.filter((r) => r.cloned);
 
-// Same rule as the server: feature/<Jira key>, else a few words of the input.
-function branchName(input) {
-  const key = /\b[A-Z][A-Z0-9]+-\d+\b/.exec(input || '')?.[0];
-  if (key) return `feature/${key}`;
-  const words = String(input || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean).slice(0, 5).join('-');
-  return words ? `feature/${words}` : '';
-}
-
-let startBranchTouched = false; // you typed your own branch name: stop filling it from the input
-
 async function openStart(templateId) {
   await loadTemplates();
   const dlg = $('#start-dialog');
@@ -629,12 +750,12 @@ async function openStart(templateId) {
   sel.innerHTML = state.templates.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
   if (templateId) sel.value = templateId;
   $('textarea[name=text]', dlg).value = '';
-  startBranchTouched = false;
   renderStartRepos();
   dlg.showModal();
 }
 
-// One line per repo: tick it to give the run a worktree, on a new or an existing branch.
+// One line per repo: tick it to give the run its own worktree, and pick the code it starts from.
+// No branch is picked here: the skills make the branch (ITP epics: epics/<release>-…).
 function renderStartRepos() {
   const box = $('#start-repos');
   const repos = cloned();
@@ -644,58 +765,23 @@ function renderStartRepos() {
   }
   const tpl = state.templates.find((t) => t.id === $('select[name=templateId]').value);
   const picked = new Set(tpl?.repos || []);
-  const name = branchName($('textarea[name=text]').value);
   box.innerHTML = `
     <div class="repo-plan">
-      <label>New branch name (same in every repo) <input id="start-branch" value="${esc(name)}" placeholder="feature/PROJ-101"></label>
+      <div class="small"><b>Repos</b> for this run</div>
       ${repos.map((r) => `
         <div class="repo-row" data-token="${esc(r.token)}">
           <label class="check"><input type="checkbox" data-pick ${picked.has(r.token) ? 'checked' : ''}> <b>${esc(r.token)}</b> <span class="muted small">${esc(r.folder)}</span></label>
-          <select data-mode><option value="new">new branch</option><option value="existing">existing branch</option></select>
-          <span data-new class="small">from <input data-base value="${esc(r.defaultBase || '')}" size="26"></span>
-          <span data-existing class="small" hidden><select data-existing-branch><option value="">loading…</option></select></span>
+          <span class="small">starts from <input data-base value="${esc(r.defaultBase || '')}" size="28"></span>
         </div>`).join('')}
-      <div class="muted small">Ticked repos get their own worktree for this run. Your own checkouts are not switched. <code>main</code> is refused.</div>
+      <div class="muted small">Each ticked repo gets its own worktree with the latest code of that branch. The skills make the work branch (for an ITP epic: <code>epics/…</code>), and Orchestra follows it. Your own checkouts are not switched. Commits and pushes to <code>main</code> are refused.</div>
     </div>`;
 }
 
 $('select[name=templateId]').addEventListener('change', renderStartRepos);
-$('textarea[name=text]').addEventListener('input', (e) => {
-  const b = $('#start-branch');
-  if (b && !startBranchTouched) b.value = branchName(e.target.value);
-});
-$('#start-repos').addEventListener('input', (e) => {
-  if (e.target.id === 'start-branch') startBranchTouched = true;
-});
-$('#start-repos').addEventListener('change', async (e) => {
-  const row = e.target.closest('.repo-row');
-  if (!row || !e.target.matches('[data-mode]')) return;
-  const existing = e.target.value === 'existing';
-  $('[data-new]', row).hidden = existing;
-  $('[data-existing]', row).hidden = !existing;
-  $('[data-pick]', row).checked = true;
-  const sel = $('[data-existing-branch]', row);
-  if (existing && sel.options.length <= 1 && !sel.dataset.loaded) {
-    try {
-      const { branches } = await api('GET', `/api/repos/${encodeURIComponent(row.dataset.token)}/branches`);
-      // Branches checked out elsewhere are shown but cannot be picked.
-      const free = branches.filter((b) => !b.inUse);
-      sel.innerHTML = [...free, ...branches.filter((b) => b.inUse)].map((b) => `<option value="${esc(b.name)}" ${b.inUse ? 'disabled' : ''}>${esc(b.name)}${b.inUse ? ' (in use)' : ''}</option>`).join('') || '<option value="">no branches</option>';
-      sel.dataset.loaded = '1';
-    } catch (err) {
-      sel.innerHTML = `<option value="">${esc(err.message)}</option>`;
-    }
-  }
-});
 
 function startRepos() {
-  const branch = $('#start-branch')?.value.trim() || '';
-  return [...document.querySelectorAll('#start-repos .repo-row')].filter((row) => $('[data-pick]', row).checked).map((row) => {
-    const mode = $('[data-mode]', row).value;
-    return mode === 'existing'
-      ? { token: row.dataset.token, mode, branch: $('[data-existing-branch]', row).value }
-      : { token: row.dataset.token, mode, branch, base: $('[data-base]', row).value.trim() };
-  });
+  return [...document.querySelectorAll('#start-repos .repo-row')].filter((row) => $('[data-pick]', row).checked)
+    .map((row) => ({ token: row.dataset.token, base: $('[data-base]', row).value.trim() }));
 }
 
 // The form stays open when the server says no, so nothing you typed is lost.
@@ -720,7 +806,7 @@ $('#start-form').addEventListener('submit', async (e) => {
 function workspaceLine(r) {
   const repos = r.workspace?.repos || r.repoPlan || [];
   if (!repos.length) return '';
-  const list = repos.map((p) => `${esc(p.token)} on <code>${esc(p.branch)}</code>${p.mode === 'new' && p.base ? ` <span class="muted">(new, from ${esc(p.base)})</span>` : ''}`).join(' · ');
+  const list = repos.map((p) => (p.branch ? `${esc(p.token)} on <code>${esc(p.branch)}</code>` : `${esc(p.token)} <span class="muted">(no branch yet, from ${esc(p.base)})</span>`)).join(' · ');
   const where = r.workspace?.ready ? `Workspace <code>${esc(r.workspace.dir)}</code>` : 'Workspace is made when the run starts';
   return `<div class="small">${where}: ${list}</div>`;
 }
@@ -736,6 +822,8 @@ document.addEventListener('click', (e) => {
   if (a && !a.disabled) return act(a.dataset.act, a);
   const add = e.target.closest('[data-add]');
   if (add) return addSkill(add.dataset.add);
+  const row = e.target.closest('tr[data-href]');
+  if (row && !e.target.closest('a')) return (location.hash = row.dataset.href);
   const node = e.target.closest('.node[data-box]');
   if (node && state.ed) {
     state.ed.sel = state.ed.sel === node.dataset.box ? null : node.dataset.box;
@@ -754,6 +842,16 @@ document.addEventListener('change', (e) => {
         fail(err);
       })
       .finally(() => el.blur());
+    return;
+  }
+  if (e.target.id === 'learn-auto') {
+    const el = e.target;
+    api('PUT', '/api/settings', { learn: el.checked })
+      .then((s) => (state.settings = s))
+      .catch((err) => {
+        el.checked = state.settings.learn !== false;
+        fail(err);
+      });
     return;
   }
   if (!state.ed) return;
@@ -886,6 +984,11 @@ function connect() {
       loadTimeline(); // catch up on what happened while disconnected
     }
   });
+  es.addEventListener('suggestions', (e) => {
+    state.suggestions = JSON.parse(e.data);
+    learnBadge();
+    if (state.route.name === 'learn') renderLearn();
+  });
   es.addEventListener('skills', (e) => {
     state.skills = JSON.parse(e.data);
     if (state.route.name === 'skills') renderSkillMarkRows();
@@ -922,7 +1025,8 @@ function connect() {
 setInterval(() => state.route.name === 'board' && renderBoard(), 30000);
 
 (async function main() {
-  [state.skills, state.repos] = await Promise.all([api('GET', '/api/skills').catch(() => []), api('GET', '/api/repos').catch(() => [])]);
+  [state.skills, state.repos, state.suggestions] = await Promise.all([api('GET', '/api/skills').catch(() => []), api('GET', '/api/repos').catch(() => []), api('GET', '/api/suggestions').catch(() => [])]);
+  learnBadge();
   window.addEventListener('hashchange', onRoute);
   connect();
   await onRoute();

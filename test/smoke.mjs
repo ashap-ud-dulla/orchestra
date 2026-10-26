@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { parseFrontmatter } from '../lib/skills-scan.mjs';
 import { childEnv, guardEnv, killOrphan } from '../lib/runner.mjs';
-import { check, readMark } from '../lib/guard.mjs';
+import { check, readMark, readWhy } from '../lib/guard.mjs';
+import { computeStats } from '../lib/stats.mjs';
+import { material, parseSuggestions } from '../lib/learn.mjs';
 import { detect } from '../lib/tracking.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -151,6 +153,13 @@ test('git hooks: push waits for Approve, main is refused, the repo hook still ru
     fs.writeFileSync(path.join(t, 'work', 'c'), 'c');
     git(['add', 'c']);
     assert.match(git(['commit', '-qm', 'c'], guard(false)).stderr, /main branch is refused/);
+    // The vault is committed on main by design: allowed there, and only there. Pushing it to main is still refused.
+    const vault = { ...guard(true), ORCHESTRA_MAIN_OK: `C:/elsewhere/ITPKV\n${path.join(t, 'work')}` };
+    assert.match(git(['commit', '-qm', 'c'], { ...guard(false), ORCHESTRA_MAIN_OK: 'C:/elsewhere/ITPKV' }).stderr, /main branch is refused/);
+    assert.equal(git(['commit', '-qm', 'c'], vault).status, 0, 'a vault commit on main');
+    assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /main branch is refused/);
+    assert.equal(check('Bash', { command: 'git -C ITPKV checkout main' }, {}), null, 'the vault may stay on main');
+    assert.ok(check('Bash', { command: 'git -C ITP-API checkout main' }, {}));
     git(['checkout', '-q', 'feature/x']);
     fs.writeFileSync(path.join(t, 'work', '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho REPO-HOOK-RAN >&2\n', { mode: 0o755 });
     fs.writeFileSync(path.join(t, 'work', 'd'), 'd');
@@ -494,10 +503,10 @@ function makeFakeItp() {
   return { root, api, worktrees: path.join(tmp, 'wt') };
 }
 
-test('workspace: a run gets worktrees of its repos on its branch, with ITP linked around them', async () => {
+test('workspace: worktrees start from the latest dev code with no branch; the branch the skill makes is followed', async () => {
   const itp = makeFakeItp();
   await killServer();
-  await startServer({ ORCHESTRA_ITP_ROOT: itp.root, ORCHESTRA_WORKTREES_DIR: itp.worktrees });
+  await startServer({ ORCHESTRA_ITP_ROOT: itp.root, ORCHESTRA_WORKTREES_DIR: itp.worktrees, FAKE_CLAUDE_GIT: 'orchestra-hello:epics/lyra-ITP-E-07-demo' });
   const { body: repos } = await api('GET', '/api/repos');
   assert.deepEqual(repos.map((r) => r.token), ['api'], 'the ITP workspace repo itself is never offered');
   assert.equal(repos[0].defaultBase, 'origin/development/mission');
@@ -505,11 +514,14 @@ test('workspace: a run gets worktrees of its repos on its branch, with ITP linke
   assert.equal((await api('PUT', '/api/templates/ws-demo', tpl)).status, 200);
   try {
     const { body: run } = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'PROJ-9 fix it' } });
-    assert.deepEqual(run.repoPlan.map((p) => [p.token, p.mode, p.branch, p.base]), [['api', 'new', 'feature/PROJ-9', 'origin/development/mission']]);
+    assert.deepEqual(run.repoPlan.map((p) => [p.token, p.base, p.branch]), [['api', 'origin/development/mission', null]], 'no branch is picked at the start');
     const done = await waitStatus(run.id, 'done');
     const ws = done.workspace.dir;
     const wt = path.join(ws, 'ITP-API');
-    assert.equal(spawnSync('git', ['-C', wt, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'feature/PROJ-9');
+    assert.equal(spawnSync('git', ['-C', wt, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'epics/lyra-ITP-E-07-demo');
+    assert.equal(done.workspace.repos[0].branch, 'epics/lyra-ITP-E-07-demo', 'Orchestra follows the skill’s branch');
+    const { body: tl } = await api('GET', `/api/runs/${run.id}/timeline`);
+    assert.ok(tl.some((e) => e.kind === 'log' && e.text === 'api: now on branch epics/lyra-ITP-E-07-demo'));
     assert.equal(spawnSync('git', ['-C', itp.api, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'development/mission', 'your checkout is not switched');
     assert.ok(fs.lstatSync(path.join(ws, 'scripts')).isSymbolicLink(), 'folders are linked');
     assert.ok(fs.lstatSync(path.join(ws, 'ITPKV')).isSymbolicLink());
@@ -518,15 +530,13 @@ test('workspace: a run gets worktrees of its repos on its branch, with ITP linke
     const [c] = fs.readFileSync(path.join(ws, 'fake-calls.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(path.resolve(c.cwd), path.resolve(ws), 'claude starts in the workspace');
     assert.equal(path.resolve(c.itpRoot), path.resolve(ws));
-    assert.equal(c.branch, 'feature/PROJ-9');
+    assert.equal(c.branch, undefined, 'no ITP_BRANCH_OVERRIDE: ITP scripts use the epic branch');
     assert.match(c.repoDirs, /^api=.*ITP-API$/);
     assert.match(c.protect, /ITP-API$/, 'your own checkout is protected');
 
-    // The same branch cannot be used twice; main and taken names are refused.
-    const again = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'existing', branch: 'feature/PROJ-9' }] });
-    assert.equal(again.status, 409);
-    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'new', branch: 'main' }] })).status, 400);
-    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', mode: 'new', branch: 'development/mission' }] })).status, 400);
+    // A bad starting point, or an unknown repo, is refused.
+    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'api', base: 'a..b' }] })).status, 400);
+    assert.equal((await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'x' }, repos: [{ token: 'nope' }] })).status, 400);
 
     // Uncommitted work blocks a delete, unless you say so. Deleting never touches your real files.
     fs.writeFileSync(path.join(wt, 'wip.txt'), 'not committed');
@@ -536,20 +546,27 @@ test('workspace: a run gets worktrees of its repos on its branch, with ITP linke
     assert.ok(fs.existsSync(path.join(itp.api, 'node_modules', 'left-pad', 'index.js')), 'real node_modules kept');
     assert.ok(fs.existsSync(path.join(itp.root, 'scripts', 'hello.sh')), 'real scripts kept');
     assert.ok(fs.existsSync(path.join(itp.root, 'ITPKV', 'note.md')), 'real vault kept');
-    assert.ok(spawnSync('git', ['-C', itp.api, 'show-ref', '--verify', '--quiet', 'refs/heads/feature/PROJ-9']).status === 0, 'the branch is kept');
+    assert.ok(spawnSync('git', ['-C', itp.api, 'show-ref', '--verify', '--quiet', 'refs/heads/epics/lyra-ITP-E-07-demo']).status === 0, 'the branch is kept');
   } finally {
     await api('DELETE', '/api/templates/ws-demo');
   }
 });
 
-test('workspace: an existing branch can be picked again after its run is gone', async () => {
+test('workspace: commits made with no branch are saved on orchestra/<run id>', async () => {
+  await killServer();
+  const itp = { root: path.join(tmp, 'itp'), api: path.join(tmp, 'itp', 'ITP-API'), worktrees: path.join(tmp, 'wt') };
+  await startServer({ ORCHESTRA_ITP_ROOT: itp.root, ORCHESTRA_WORKTREES_DIR: itp.worktrees, FAKE_CLAUDE_GIT: 'orchestra-hello:-' });
   await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] });
   try {
-    const { status, body: run } = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'again' }, repos: [{ token: 'api', mode: 'existing', branch: 'feature/PROJ-9' }] });
-    assert.equal(status, 200, JSON.stringify(run));
+    const { body: run } = await api('POST', '/api/runs', { templateId: 'ws-demo', input: { text: 'loose' } });
     const done = await waitStatus(run.id, 'done');
-    assert.equal(spawnSync('git', ['-C', path.join(done.workspace.dir, 'ITP-API'), 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), 'feature/PROJ-9');
+    const safe = `orchestra/${run.id}`;
+    assert.equal(done.workspace.repos[0].branch, safe);
+    assert.equal(spawnSync('git', ['-C', path.join(done.workspace.dir, 'ITP-API'), 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(), safe);
+    const { body: tl } = await api('GET', `/api/runs/${run.id}/timeline`);
+    assert.ok(tl.some((e) => e.kind === 'log' && /1 commit was made with no branch\. Saved on orchestra\//.test(e.text)));
     assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 200, 'nothing uncommitted: no force needed');
+    assert.equal(spawnSync('git', ['-C', itp.api, 'log', '-1', '--format=%s', safe], { encoding: 'utf8' }).stdout.trim(), 'fake work', 'the commit survives the delete');
   } finally {
     await api('DELETE', '/api/templates/ws-demo');
     await killServer();
@@ -698,6 +715,106 @@ test('tracking OFF: a box whose skill is marked while the run works fails before
     await killServer();
     await startServer();
   }
+});
+
+test('a finished box keeps its "what I did and why" note apart from its result', async () => {
+  assert.deepEqual(readWhy('Done.\n\n## What I did and why\n- a, because b'), { text: 'Done.', why: '- a, because b' });
+  assert.deepEqual(readWhy('WHAT I DID AND WHY: I fixed x.'), { text: '', why: 'I fixed x.' });
+  assert.equal(readWhy('No note here.').why, null);
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'why' } });
+  const done = await waitStatus(run.id, 'done');
+  assert.equal(done.boxes[0].summary, 'Ran orchestra-hello.');
+  assert.equal(done.boxes[0].didWhy, '- I ran orchestra-hello, because the box asked for it.');
+});
+
+test('code walk-through: after a box with "explain" ticked, and on demand', async () => {
+  const { body: d } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'walk' }, start: false });
+  await api('PUT', `/api/runs/${d.id}/boxes`, { boxes: [{ id: 'hello', skill: 'orchestra-hello', walkthrough: true, waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }] });
+  await api('POST', `/api/runs/${d.id}/resume`);
+  const waiting = await waitStatus(d.id, 'waiting');
+  const w = waiting.chat.find((m) => m.kind === 'walkthrough');
+  assert.equal(w?.boxId, 'hello');
+  assert.equal(w.status, 'answered', 'answered before the run waits for you');
+  assert.match(w.reply, /guard clause/);
+  assert.equal(calls(waiting)[1].resumed, true, 'in the same session');
+  await api('POST', `/api/runs/${d.id}/resume`);
+  const done = await waitStatus(d.id, 'done');
+  assert.equal(done.chat.filter((m) => m.kind === 'walkthrough').length, 1, 'only after the ticked box');
+  assert.equal((await api('POST', `/api/runs/${d.id}/walkthrough`)).status, 200);
+  const again = await waitFor(async () => ((await getRun(d.id)).chat.filter((m) => m.kind === 'walkthrough' && m.status === 'answered').length === 2 ? getRun(d.id) : null), 'the asked walk-through');
+  assert.equal(again.chat.at(-1).boxId, undefined);
+});
+
+test('stats: spend, per-template and per-skill numbers, and the history', async () => {
+  const runs = [
+    { id: 'r1', templateId: 't', templateName: 'T', status: 'done', cost: 0.5, createdAt: new Date().toISOString(), input: { text: 'a' },
+      boxes: [{ skill: 'x', attempts: 2, failures: 1, status: 'done', cost: 0.3, durationMs: 1000, error: null }, { skill: 'y', attempts: 1, status: 'done', cost: 0.2, durationMs: 3000 }] },
+    { id: 'r2', templateId: 't', templateName: 'T', status: 'failed', cost: 0.1, createdAt: '2020-01-01T00:00:00Z', input: { text: 'b' },
+      boxes: [{ skill: 'x', attempts: 1, status: 'failed', cost: 0.1, error: 'boom', endedAt: '2020-01-01T00:01:00Z' }, { skill: 'y', attempts: 0, status: 'pending', cost: 0 }] },
+  ];
+  const s = computeStats(runs);
+  assert.deepEqual([s.totals.runs, s.totals.done, s.totals.failed, s.totals.cost, s.totals.costToday], [2, 1, 1, 0.6, 0.5]);
+  assert.deepEqual(s.templates[0], { id: 't', name: 'T', runs: 2, done: 1, failed: 1, cost: 0.6, avgCost: 0.5, avgWorkMs: 4000 });
+  const x = s.skills.find((k) => k.skill === 'x');
+  assert.deepEqual([x.boxes, x.tries, x.failures, x.done, x.avgMs, x.lastError, x.lastErrorRun], [2, 3, 2, 1, 1000, 'boom', 'r2']);
+  assert.equal(s.skills[0].skill, 'x', 'most failures first');
+  assert.equal(s.skills.find((k) => k.skill === 'y').boxes, 1, 'a box that never ran is left out');
+  assert.deepEqual(s.history.map((r) => r.id), ['r1', 'r2']);
+  const { status, body } = await api('GET', '/api/stats');
+  assert.equal(status, 200);
+  assert.ok(body.totals.runs > 0 && body.history.length === body.totals.runs);
+});
+
+test('learn: what a run teaches is read from your words and its failures', () => {
+  const run = { templateName: 'T', boxes: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 2, failures: 1, error: 'boom' }],
+    chat: [{ kind: 'answer', boxId: 'a', text: 'blue' }, { text: 'hurry up' }, { kind: 'walkthrough', text: 'Walk me…' }] };
+  const m = material(run);
+  assert.match(m, /answered a question from "A": blue/);
+  assert.match(m, /chat: hurry up/);
+  assert.match(m, /failed 1 time\(s\)\. Last error: boom/);
+  assert.doesNotMatch(m, /Walk me/);
+  assert.equal(material({ boxes: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 1 }], chat: [] }), '');
+  assert.deepEqual(parseSuggestions('```json\n{"rules":[{"text":" r ","why":"w"},{"nope":1}],"workflow":[{"text":"c"}]}\n```'),
+    [{ kind: 'rule', text: 'r', why: 'w' }, { kind: 'workflow', text: 'c', why: '' }]);
+  assert.throws(() => parseSuggestions('no json here'));
+});
+
+test('learn: after a run you talked to, lessons are suggested; an accepted rule reaches later runs', async () => {
+  const { body: d } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'learn' }, start: false });
+  await api('POST', `/api/runs/${d.id}/chat`, { text: 'Use blue please.' });
+  await waitFor(async () => (await getRun(d.id)).chat[0].status === 'answered', 'the chat answer');
+  await api('POST', `/api/runs/${d.id}/resume`);
+  await waitStatus(d.id, 'done');
+  const run = await waitFor(async () => ((await getRun(d.id)).learn?.status === 'done' ? getRun(d.id) : null), 'the lessons');
+  assert.equal(run.learn.count, 2, 'one rule and one workflow change; the empty one is dropped');
+  assert.equal(run.learn.auto, true);
+  assert.equal(run.cost, 0.04, 'the lesson call counts in the run cost');
+  const learnCall = JSON.parse(fs.readFileSync(path.join(runsDir, d.id, 'learn', 'fake-calls.log'), 'utf8').trim());
+  assert.equal(learnCall.resumed, false, 'a fresh session, not the run');
+  assert.match(learnCall.noTools, /Bash.*Edit.*Write/);
+  const list = (await api('GET', '/api/suggestions')).body.filter((s) => s.runId === d.id);
+  const rule = list.find((s) => s.kind === 'rule');
+  const flow = list.find((s) => s.kind === 'workflow');
+  assert.equal(rule.text, 'Use blue for buttons.');
+  assert.equal(flow.templateId, 'demo-hello-recap');
+
+  assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'accept', text: 'Use blue for all buttons.' })).status, 200);
+  assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'reject' })).status, 409, 'decided once');
+  assert.equal((await api('POST', `/api/suggestions/${flow.id}`, { action: 'reject' })).body.status, 'rejected');
+  assert.equal((await api('POST', `/api/suggestions/${flow.id}`, { action: 'maybe' })).status, 400);
+  assert.match((await api('GET', '/api/instructions')).body.text, /^- Use blue for all buttons\.\n$/);
+
+  // The next run follows the rule. It had nothing to learn from, so no lesson call is made.
+  const { body: next } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'next' } });
+  const nextDone = await waitStatus(next.id, 'done');
+  assert.equal(calls(nextDone)[0].myRules, true);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await getRun(next.id)).learn, undefined);
+  // On demand it runs anyway; a working run is refused.
+  assert.equal((await api('POST', `/api/runs/${next.id}/learn`)).status, 200);
+  await waitFor(async () => (await getRun(next.id)).learn?.status === 'done', 'lessons on demand');
+  assert.equal((await api('PUT', '/api/instructions', { text: '' })).status, 200);
+  assert.equal((await api('PUT', '/api/settings', { learn: 'yes' })).status, 400);
 });
 
 test('the page and its files are served', async () => {

@@ -30,3 +30,37 @@ orchestra_chain() {
   [ -f "$hook" ] || return 0
   "$hook" "$@"
 }
+
+# The current repo is one where local work on main is allowed: the vault (ITPKV), which the
+# team commits to on main by design. ORCHESTRA_MAIN_OK lists those folders, one per line.
+orchestra_main_ok() {
+  [ -n "$ORCHESTRA_MAIN_OK" ] || return 1
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_p=$(cd "$top" 2>/dev/null && pwd -P)
+  old_ifs=$IFS
+  IFS='
+'
+  for d in $ORCHESTRA_MAIN_OK; do
+    d_p=$(cd "$d" 2>/dev/null && pwd -P)
+    for a in "$top" "$top_p"; do
+      for b in "$d" "$d_p"; do
+        [ -n "$a" ] && [ -n "$b" ] || continue
+        if [ "$(orchestra_norm "$a")" = "$(orchestra_norm "$b")" ]; then IFS=$old_ifs; return 0; fi
+      done
+    done
+  done
+  IFS=$old_ifs
+  return 1
+}
+
+# One spelling for a path: forward slashes, /c/ as c:/, lower case, no trailing slash.
+orchestra_norm() {
+  printf '%s' "$1" | tr '\\' '/' | sed -e 's#^/\([a-zA-Z]\)/#\1:/#' -e 's#/*$##' | tr 'A-Z' 'a-z'
+}
+
+# Refuses work on main, except in the vault.
+orchestra_no_main() {
+  [ "$(orchestra_branch)" = "main" ] || return 0
+  orchestra_main_ok && return 0
+  orchestra_refuse "work on the main branch is refused. Use the run's work branch."
+}

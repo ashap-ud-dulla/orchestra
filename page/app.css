@@ -164,3 +164,35 @@ code { font: 12px ui-monospace, Consolas, monospace; background: var(--soft); bo
 .node.blocked { border: 2px dashed var(--bad); background: var(--bad-bg); }
 .tag-tracks { font-size: 10px; font-weight: 600; color: var(--wait); background: var(--wait-bg); border-radius: 4px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
 .hidden-note { margin: 6px 4px 8px; padding: 6px 8px; border-radius: 6px; background: var(--soft); color: var(--muted, inherit); }
+
+/* step 7: stats, notes, walk-through */
+.page.wide { max-width: 1200px; }
+.page h2 { margin-top: 22px; }
+.summary-line { font-size: 14px; }
+table.stats { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+table.stats th, table.stats td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.stats th { color: var(--muted); font-weight: 600; font-size: 12px; }
+table.stats tr:last-child td { border-bottom: 0; }
+table.stats .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.stats .bad { color: var(--bad); font-weight: 600; }
+tr.link-row { cursor: pointer; }
+tr.link-row:hover td { background: var(--soft); }
+.why-note { white-space: pre-wrap; font-size: 13px; line-height: 1.45; background: var(--ok-bg); border-left: 3px solid var(--ok); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; }
+.bubble.you.auto { background: var(--soft); color: var(--fg); font-style: italic; }
+@media (max-width: 700px) { table.stats { display: block; overflow-x: auto; } }
+/* Narrow screens: the nav goes on its own line, so New run stays in view. */
+@media (max-width: 600px) {
+  .top { flex-wrap: wrap; gap: 8px 12px; }
+  .top nav { order: 3; width: 100%; overflow-x: auto; }
+}
+
+/* step 8: learn */
+.badge { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 2px; border-radius: 8px; background: var(--wait); color: #111; font-size: 11px; font-weight: 700; text-align: center; line-height: 16px; }
+.learn textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.item.sug { align-items: flex-start; }
+.item.sug .grow { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sug-text { font-size: 14px; }
+.col-btns { display: flex; flex-direction: column; gap: 6px; }
+.col-btns a button { width: 100%; }
+@media (max-width: 600px) { .item.sug { flex-direction: column; } .col-btns { flex-direction: row; flex-wrap: wrap; } }
+.badge[hidden] { display: none; }
