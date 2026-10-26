@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { parseFrontmatter } from '../lib/skills-scan.mjs';
 import { childEnv, guardEnv, killOrphan } from '../lib/runner.mjs';
 import { check, readMark } from '../lib/guard.mjs';
+import { detect } from '../lib/tracking.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 7171;
@@ -596,6 +597,107 @@ test('a run that starts to need you sends a notification', async () => {
   assert.ok(tl.some((e) => e.kind === 'log' && e.text === 'notification (off): is waiting for you'));
   await killServer();
   await startServer();
+});
+
+test('tracking: a skill is marked only for real signs of writing, not for a mention', () => {
+  assert.deepEqual(detect('Read the Teamspace ticket and the ITPKV notes.'), []);
+  assert.ok(detect('Then run `bash scripts/close-epic.sh <epic>`.').length);
+  assert.ok(detect('code="$(registry_call PUT /api/epics/x/board)"').length);
+  assert.ok(detect('"<WS>/Orbitax-Teamspace/backend/teamspace.exe" register-epic x').length);
+  assert.ok(detect('It writes the plan into ITPKV/Execution.').length);
+  assert.deepEqual(detect('registry_call GET /api/features'), [], 'a read is not a write');
+});
+
+test('guard: tracking OFF blocks Teamspace and vault writes, and allows vault reads', () => {
+  const off = { ORCHESTRA_TRACKING: 'off', ORCHESTRA_ALLOW_PUSH: '1' };
+  const v = (tool, input) => check(tool, typeof input === 'string' ? { command: input } : input, off);
+  for (const c of ['bash scripts/close-epic.sh E-1', '"C:/o/0/Orbitax-Teamspace/backend/teamspace.exe" register-epic x', 'teamspace register-epic x',
+    'source scripts/lib/common.sh && registry_call POST /x', 'curl https://teamspace.orbitax.com/api', 'bash scripts/sync-vault.sh', 'ITP_REGISTRY_OFF=0 bash x.sh',
+    'echo hi > ITPKV/a.md', 'mkdir -p "$VAULT_DIR/E-1"', 'cp a.md ITPKV/x/', 'git -C ITPKV commit -m x', 'cd ITPKV && git add . && git commit -m x']) {
+    assert.equal(v('Bash', c)?.needsApproval, false, c);
+  }
+  assert.ok(v('PowerShell', 'Set-Content -Path C:\\o\\0\\ITPKV\\x.md -Value hi'));
+  assert.ok(v('Write', { file_path: 'C:\\o\\0\\ITPKV\\x.md' }));
+  assert.ok(v('mcp__teamspace__create_ticket', {}));
+  for (const c of ['cat ITPKV/E-1/manifest.json', 'grep -ri teamspace ITPKV/docs | head', 'cp ITPKV/t.md ./out.md', 'ls "$VAULT_DIR"', 'git status']) {
+    assert.equal(v('Bash', c), null, c);
+  }
+  assert.equal(v('Write', { file_path: 'C:/o/0/ITP-API/a.cs' }), null);
+  assert.equal(check('Bash', { command: 'bash scripts/close-epic.sh E-1' }, { ORCHESTRA_TRACKING: 'on' }), null, 'tracking on: allowed');
+});
+
+test('tracking OFF turns ITP scripts away from Teamspace; the setting is never inherited', () => {
+  assert.equal(guardEnv('run-x', false, false).ITP_REGISTRY_OFF, '1');
+  assert.equal(guardEnv('run-x', false, false).ORCHESTRA_TRACKING, 'off');
+  assert.equal(guardEnv('run-x', false, true).ITP_REGISTRY_OFF, undefined);
+  process.env.ORCHESTRA_TRACKING = 'on';
+  try {
+    assert.equal(childEnv().ORCHESTRA_TRACKING, undefined);
+  } finally {
+    delete process.env.ORCHESTRA_TRACKING;
+  }
+});
+
+test('tracking OFF: marked skills are refused; your mark changes what is refused', async () => {
+  const mark = (name, m) => api('PUT', `/api/skill-marks/${name}`, { mark: m });
+  // The demo template has tracking OFF. Mark its second skill as one that writes.
+  const marked = await mark('orchestra-recap', 'writes');
+  assert.equal(marked.status, 200);
+  const recap = marked.body.find((s) => s.name === 'orchestra-recap');
+  assert.equal(recap.tracks, true);
+  assert.equal(recap.tracksAuto, false);
+  assert.equal(recap.mark, 'writes');
+  assert.equal((await mark('orchestra-recap', 'nonsense')).status, 400);
+
+  const { body: tpl } = await api('GET', '/api/templates/demo-hello-recap');
+  const saved = await api('PUT', '/api/templates/tracking-copy', { ...tpl, id: 'tracking-copy' });
+  assert.equal(saved.status, 409, 'a tracking-OFF template may not hold it');
+  assert.match(saved.body.error, /orchestra-recap.*Teamspace or the vault/);
+  assert.equal((await api('PUT', '/api/templates/tracking-copy', { ...tpl, id: 'tracking-copy', tracking: true })).status, 200, 'with tracking on it may');
+
+  assert.equal((await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x' } })).status, 409, 'start refused');
+  const { status, body: draft } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x' }, start: false });
+  assert.equal(status, 200, 'a draft is made, so you can remove the box');
+  assert.equal((await api('POST', `/api/runs/${draft.id}/resume`)).status, 409);
+  const hello = [{ id: 'hello', skill: 'orchestra-hello' }];
+  assert.equal((await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes: hello })).status, 200);
+  assert.equal((await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes: [...hello, { id: 'recap', skill: 'orchestra-recap' }] })).status, 409, 'it cannot be added back');
+  await api('POST', `/api/runs/${draft.id}/resume`);
+  const done = await waitStatus(draft.id, 'done');
+  const [c] = calls(done);
+  assert.equal(c.tracking, 'off');
+  assert.equal(c.registryOff, '1');
+  assert.equal(c.offRule, true);
+
+  // Back to the guess: the recap skill has no sign of writing, so the template runs again.
+  const back = await mark('orchestra-recap', 'auto');
+  assert.equal(back.body.find((s) => s.name === 'orchestra-recap').tracks, false);
+  const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'y' } });
+  await waitStatus(run.id, 'done');
+  const { body: on } = await api('POST', '/api/runs', { templateId: 'tracking-copy', input: { text: 'z' } });
+  const onDone = await waitStatus(on.id, 'done');
+  assert.equal(calls(onDone)[0].tracking, 'on');
+  assert.equal(calls(onDone)[0].registryOff, undefined);
+  assert.equal(calls(onDone)[0].offRule, false);
+  await api('DELETE', '/api/templates/tracking-copy');
+});
+
+test('tracking OFF: a box whose skill is marked while the run works fails before it starts', async () => {
+  await killServer();
+  await startServer({ FAKE_CLAUDE_SLEEP_MS: '1200' });
+  try {
+    const { body: run } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'late' } });
+    await waitFor(async () => (await getRun(run.id)).boxes[0].status === 'running', 'box 1 to start');
+    await api('PUT', '/api/skill-marks/orchestra-recap', { mark: 'writes' });
+    const failed = await waitStatus(run.id, 'failed');
+    assert.equal(failed.boxes[0].status, 'done');
+    assert.match(failed.boxes[1].error, /writes to Teamspace or the vault/);
+    assert.equal(calls(failed).length, 1, 'the recap box never ran');
+  } finally {
+    await api('PUT', '/api/skill-marks/orchestra-recap', { mark: 'auto' });
+    await killServer();
+    await startServer();
+  }
 });
 
 test('the page and its files are served', async () => {

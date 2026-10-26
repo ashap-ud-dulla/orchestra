@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './lib/config.mjs';
 import { scanSkills } from './lib/skills-scan.mjs';
+import { setMark, offProblems, OFF_HELP } from './lib/tracking.mjs';
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate } from './lib/store.mjs';
 import { Runner } from './lib/runner.mjs';
 import { listRepos, branchesFor, branchNameFor } from './lib/workspace.mjs';
@@ -64,7 +65,21 @@ const routes = [
   ['GET', /^\/api\/skills$/, () => scanSkills()],
   ['GET', /^\/api\/templates$/, () => listTemplates()],
   ['GET', /^\/api\/templates\/([^/]+)$/, async (_req, [id]) => (await getTemplate(id)) ?? notFound('template')],
-  ['PUT', /^\/api\/templates\/([^/]+)$/, async (req, [id]) => saveTemplate({ ...(await readBody(req)), id })],
+  ['PUT', /^\/api\/templates\/([^/]+)$/, async (req, [id]) => {
+    const t = { ...(await readBody(req)), id };
+    if (t.tracking === false) {
+      const problems = offProblems(t.boxes, await scanSkills());
+      if (problems.length) throw Object.assign(new Error(`${problems.join('; ')}. ${OFF_HELP}`), { status: 409 });
+    }
+    return saveTemplate(t);
+  }],
+  // Your correction of a skill's tracking mark: auto, writes or clean.
+  ['PUT', /^\/api\/skill-marks\/([^/]+)$/, async (req, [name]) => {
+    await setMark(decodeURIComponent(name), (await readBody(req)).mark);
+    const skills = await scanSkills();
+    broadcast('skills', skills);
+    return skills;
+  }],
   ['DELETE', /^\/api\/templates\/([^/]+)$/, async (_req, [id]) => (await deleteTemplate(id), { ok: true })],
   ['GET', /^\/api\/settings$/, () => runner.getSettings()],
   ['PUT', /^\/api\/settings$/, async (req) => {

@@ -67,6 +67,7 @@ function parseRoute() {
   if (parts[0] === 'run' && parts[1]) return { name: 'run', id: parts[1] };
   if (parts[0] === 'template' && parts[1]) return { name: 'template', id: parts[1] };
   if (parts[0] === 'templates') return { name: 'templates' };
+  if (parts[0] === 'skills') return { name: 'skills' };
   return { name: 'board' };
 }
 
@@ -79,6 +80,7 @@ async function onRoute() {
   const { name, id } = state.route;
   if (name === 'board') return renderBoard();
   if (name === 'templates') return renderTemplates();
+  if (name === 'skills') return renderSkillMarks();
   if (name === 'run') {
     state.ed = { kind: 'run', id, sel: null, timeline: [], filter: '' };
     mountEditor();
@@ -178,6 +180,54 @@ async function loadTemplates() {
   state.templates = await api('GET', '/api/templates').catch(() => []);
 }
 
+// ---------- skills page: which skills write to Teamspace or the vault ----------
+
+const skillFilter = { text: '', onlyWrites: false };
+
+function renderSkillMarks() {
+  // Do not redraw under the cursor while you type in the search box.
+  if (document.activeElement?.id === 'marks-filter') return renderSkillMarkRows();
+  $('#view').innerHTML = `<div class="page">
+    <div class="row"><h1 class="grow">Skills</h1></div>
+    <p class="muted small">A template with <b>tracking OFF</b> hides the skills marked “Writes” below, and its runs may not call Teamspace or write to the vault (ITPKV).
+      Orchestra guesses the mark from each skill’s text. If a guess is wrong, pick your own mark. Your marks are saved in <code>data/skill-marks.json</code>.</p>
+    <div class="row">
+      <input type="search" id="marks-filter" placeholder="Find a skill" value="${esc(skillFilter.text)}">
+      <label class="check"><input type="checkbox" id="marks-only" ${skillFilter.onlyWrites ? 'checked' : ''}> Only skills marked “Writes”</label>
+      <span class="grow"></span><span class="muted small" id="marks-count"></span>
+    </div>
+    <div class="list" id="marks-list"></div>
+  </div>`;
+  renderSkillMarkRows();
+}
+
+function renderSkillMarkRows() {
+  const el = $('#marks-list');
+  if (!el) return;
+  const f = skillFilter.text.toLowerCase();
+  const list = state.skills.filter((s) => (!f || s.name.toLowerCase().includes(f)) && (!skillFilter.onlyWrites || s.tracks));
+  $('#marks-count').textContent = `${state.skills.filter((s) => s.tracks).length} of ${state.skills.length} skills marked “Writes”`;
+  el.innerHTML = list.map((s) => `
+    <div class="item">
+      <div class="grow"><b>/${esc(s.name)}</b> <span class="muted small">${esc(SOURCES[s.source] || s.source)}</span>
+        <div class="muted small">Guess: ${s.tracksAuto ? `writes. It ${esc(s.why.join(', '))}.` : 'does not write (no sign found).'}</div></div>
+      <span class="chip ${s.tracks ? 'failed' : 'done'}">${s.tracks ? 'writes' : 'clean'}</span>
+      <select data-mark="${esc(s.name)}" title="Your mark">
+        <option value="auto" ${!s.mark ? 'selected' : ''}>Use the guess</option>
+        <option value="writes" ${s.mark === 'writes' ? 'selected' : ''}>Writes</option>
+        <option value="clean" ${s.mark === 'clean' ? 'selected' : ''}>Does not write</option>
+      </select>
+    </div>`).join('') || '<div class="empty">No skills match.</div>';
+}
+
+// Tracking is OFF for the open template or run.
+function trackingOff() {
+  if (!state.ed) return false;
+  return (state.ed.kind === 'run' ? edRun()?.tracking : state.ed.tpl.tracking) === false;
+}
+
+const tracksSkill = (name) => !!state.skills.find((s) => s.name === name)?.tracks;
+
 // ---------- editor ----------
 
 function edRun() {
@@ -244,16 +294,19 @@ function refreshEditor() {
 
 function renderSkills() {
   const f = state.ed.filter;
-  const list = state.skills.filter((s) => !f || s.name.toLowerCase().includes(f) || s.description.toLowerCase().includes(f));
+  const off = trackingOff();
+  const hidden = off ? state.skills.filter((s) => s.tracks).length : 0;
+  const list = state.skills.filter((s) => (!f || s.name.toLowerCase().includes(f) || s.description.toLowerCase().includes(f)) && !(off && s.tracks));
   const editable = canEdit();
   $('.skills').classList.toggle('locked', !editable);
   const groups = Object.entries(SOURCES).map(([src, title]) => [title, list.filter((s) => s.source === src)]).filter(([, l]) => l.length);
-  $('#skill-list').innerHTML = groups.map(([title, l]) => `
+  const note = off ? `<div class="hidden-note small">Tracking is OFF: ${hidden} skill${hidden === 1 ? '' : 's'} that write to Teamspace or the vault are hidden. <a href="#/skills">Check the marks</a></div>` : '';
+  $('#skill-list').innerHTML = note + (groups.map(([title, l]) => `
     <h3 class="group-title">${esc(title)}</h3>
     ${l.map((s) => `<div class="skill" draggable="${editable}" data-skill="${esc(s.name)}" title="${esc(s.description)}">
-      <div class="grow"><div class="name">${esc(s.name)}</div><div class="desc">${esc(s.description)}</div></div>
+      <div class="grow"><div class="name">${esc(s.name)}${s.tracks ? ' <span class="tag-tracks" title="Writes to Teamspace or the vault. Hidden when tracking is OFF.">tracks</span>' : ''}</div><div class="desc">${esc(s.description)}</div></div>
       <button class="small" data-add="${esc(s.name)}" ${editable ? '' : 'disabled'} title="Add at the end">+</button>
-    </div>`).join('')}`).join('') || '<div class="empty">No skills match.</div>';
+    </div>`).join('')}`).join('') || '<div class="empty">No skills match.</div>');
 }
 
 function renderHead() {
@@ -266,12 +319,12 @@ function renderHead() {
       <div class="row"><a href="#/templates" class="muted">← Templates</a></div>
       <div class="row">
         <input id="tpl-name" value="${esc(t.name)}" style="min-width:260px;font-weight:600">
-        <label class="check"><input type="checkbox" id="tpl-tracking" ${t.tracking !== false ? 'checked' : ''}> Tracking on</label>
+        <label class="check" title="Off: this workflow's runs may not call Teamspace or write to the vault (ITPKV), and skills that do are hidden."><input type="checkbox" id="tpl-tracking" ${t.tracking !== false ? 'checked' : ''}> Tracking on</label>
         <span class="row small" title="Each run of this template gets a worktree of these repos. You can change them when you start a run.">Repos:
           ${cloned().map((r) => `<label class="check"><input type="checkbox" data-tpl-repo="${esc(r.token)}" ${(t.repos || []).includes(r.token) ? 'checked' : ''}> ${esc(r.token)}</label>`).join('') || '<span class="muted">none found</span>'}
         </span>
         <span class="grow"></span>
-        <span class="muted small">${state.ed.dirty ? 'Not saved' : 'Saved'}</span>
+        <span class="muted small" id="tpl-saved">${state.ed.dirty ? 'Not saved' : 'Saved'}</span>
         <button class="primary" data-act="save-template" ${state.ed.dirty ? '' : 'disabled'}>Save</button>
         ${t.id ? `<button data-start="${esc(t.id)}">Start…</button><button class="danger" data-act="delete-template">Delete</button>` : ''}
       </div>`;
@@ -284,6 +337,7 @@ function renderHead() {
     <div class="row"><a href="#/" class="muted">← Board</a></div>
     <div class="row">
       <h1>${esc(r.templateName)}</h1><span class="chip ${esc(r.status)}">${esc(r.status)}</span>
+      ${r.tracking === false ? '<span class="chip draft" title="This run may not call Teamspace or write to the vault (ITPKV).">tracking off</span>' : ''}
       <span class="muted small">${money(r.cost)} · started ${ago(r.createdAt)} · ${esc(r.id)}</span>
       <span class="grow"></span>
       ${r.status === 'draft' ? act('resume', 'Start', 'primary') : ''}
@@ -308,13 +362,16 @@ function renderCanvas() {
   const run = edRun();
   const locked = lockedCount();
   const editable = canEdit();
+  const off = trackingOff();
   const link = (i) => `<div class="link" data-drop="${i}" ${editable && i >= locked ? 'data-drop-ok="1"' : ''}></div>`;
   const node = (b, i) => {
     const movable = editable && i >= locked;
     const gate = run?.status === 'waiting' && run.waitingAfter === b.id;
     const asks = b.status === 'question' || b.status === 'approval';
     const status = run ? b.status : '';
-    return `<div class="node ${esc(status)} ${gate || asks ? 'gate' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}">
+    // With tracking OFF, a box whose skill writes to Teamspace or the vault cannot run.
+    const blocked = off && b.status !== 'done' && tracksSkill(b.skill);
+    return `<div class="node ${esc(status)} ${gate || asks ? 'gate' : ''} ${blocked ? 'blocked' : ''} ${state.ed.sel === b.id ? 'sel' : ''}" data-box="${esc(b.id)}" draggable="${movable}" ${blocked ? 'title="Tracking is OFF and this skill writes to Teamspace or the vault"' : ''}>
       ${b.waitAfter || b.usesApp ? `<span class="pause">${[b.waitAfter && '<span title="Waits for you after this box">wait</span>', b.usesApp && '<span title="Starts the app; takes turns with other runs">app</span>'].filter(Boolean).join(' · ')}</span>` : ''}
       <div class="label">${esc(b.label || b.skill)}</div>
       <div class="skillname">/${esc(b.skill)}${b.args ? ' ' + esc(b.args.slice(0, 40)) : ''}</div>
@@ -359,6 +416,7 @@ function renderInspector() {
       <label class="check wide"><input type="checkbox" data-field="waitAfter" ${b.waitAfter ? 'checked' : ''} ${soft ? '' : 'disabled'}> Wait for me after this box</label>
       <label class="check wide"><input type="checkbox" data-field="usesApp" ${b.usesApp ? 'checked' : ''} ${soft ? '' : 'disabled'}> Starts the app to test it (takes turns with other runs)</label>
     </div>
+    ${trackingOff() && b.status !== 'done' && tracksSkill(b.skill) ? `<div class="callout bad small"><div>Tracking is OFF, and /${esc(b.skill)} writes to Teamspace or the vault. This box cannot run. Remove it, turn tracking on, or <a href="#/skills">correct the skill’s mark</a>.</div></div>` : ''}
     ${run ? `
       <div class="row small muted" style="margin:10px 0 6px">
         <span class="chip ${esc(b.status)}">${esc(b.status)}</span>
@@ -711,6 +769,34 @@ document.addEventListener('input', (e) => {
   state.ed.tpl.repos = [...document.querySelectorAll('[data-tpl-repo]:checked')].map((x) => x.dataset.tplRepo);
   state.ed.dirty = true;
   $('[data-act=save-template]').disabled = false;
+  $('#tpl-saved').textContent = 'Not saved';
+  if (e.target.id === 'tpl-tracking') {
+    renderSkills();
+    renderCanvas();
+    renderInspector();
+  }
+});
+
+// Skills page: search, filter, and your marks.
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'marks-filter') {
+    skillFilter.text = e.target.value;
+    renderSkillMarkRows();
+  }
+});
+document.addEventListener('change', async (e) => {
+  if (e.target.id === 'marks-only') {
+    skillFilter.onlyWrites = e.target.checked;
+    return renderSkillMarkRows();
+  }
+  const name = e.target.dataset?.mark;
+  if (!name) return;
+  try {
+    state.skills = await api('PUT', `/api/skill-marks/${encodeURIComponent(name)}`, { mark: e.target.value });
+  } catch (err) {
+    fail(err);
+  }
+  renderSkillMarkRows();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -799,6 +885,11 @@ function connect() {
       refreshEditor();
       loadTimeline(); // catch up on what happened while disconnected
     }
+  });
+  es.addEventListener('skills', (e) => {
+    state.skills = JSON.parse(e.data);
+    if (state.route.name === 'skills') renderSkillMarkRows();
+    else if (state.ed) refreshEditor();
   });
   es.addEventListener('settings', (e) => {
     state.settings = JSON.parse(e.data);

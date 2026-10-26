@@ -16,7 +16,7 @@ const sessionId = resumed ? arg('--resume') : crypto.randomUUID();
 const skill = (/^\/([\w:.-]+)/.exec(prompt) || [])[1] || '';
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 
-fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed, sessionId, rules: !!arg('--append-system-prompt'), allowPush: process.env.ORCHESTRA_ALLOW_PUSH, cwd: process.cwd(), itpRoot: process.env.ITP_ROOT, repoDirs: process.env.ITP_REPO_DIRS, branch: process.env.ITP_BRANCH_OVERRIDE, protect: process.env.ORCHESTRA_PROTECT }) + '\n');
+fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt, resumed, sessionId, rules: !!arg('--append-system-prompt'), allowPush: process.env.ORCHESTRA_ALLOW_PUSH, cwd: process.cwd(), itpRoot: process.env.ITP_ROOT, repoDirs: process.env.ITP_REPO_DIRS, branch: process.env.ITP_BRANCH_OVERRIDE, protect: process.env.ORCHESTRA_PROTECT, tracking: process.env.ORCHESTRA_TRACKING, registryOff: process.env.ITP_REGISTRY_OFF, offRule: /Tracking is OFF/.test(arg('--append-system-prompt') || '') }) + '\n');
 out({ type: 'system', subtype: 'init', session_id: sessionId, cwd: process.cwd() });
 out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Skill', input: { skill } }] } });
 
