@@ -10,8 +10,13 @@ Orchestra only touches ITP in three ways:
    (`bin/app.mjs`, called by the `orchestra-app-test` step): one run at a time, in line. It stops only an app
    Orchestra started; the user's own app is stopped only after they say ok (`--force`).
 
-- Node 22, no npm packages. Terminal only: no server, no web page.
-- `/orchestra` (skill in `~/.claude/skills/orchestra`) is the front door: a menu plus shortcuts. It only calls
+- Node 22, no npm packages. Terminal only: no server, no web page. Windows only (Windows Terminal, PowerShell).
+- **Any Windows PC**: no path, email or data of one PC in the code. `orch setup --itp <folder>` saves this PC's ITP
+  folder and email (from git) in `data/settings.json`; `data/` is not in git (`defaults/` holds the starter templates).
+  Tests make their own ITP folder and never read this PC's.
+- **Skills live in the repo** (`skills/`, with `{{ORCHESTRA}}` / `{{ITP}}` placeholders). `orch setup` installs them
+  into `~/.claude/skills` with the paths filled in: edit `skills/`, then run `orch setup`, never the installed copies.
+- `/orchestra` (installed from `skills/orchestra`) is the front door: a menu plus shortcuts. It only calls
   `node bin/orch.mjs <command>` (`orch help` lists them). Each run is an interactive `claude` in its own Windows
   Terminal tab (`bin/launch.mjs`), driven by Claude hooks (`bin/hook.mjs`). A step may name its model and effort;
   when the next step wants others, the launcher restarts claude in the same tab on the same conversation

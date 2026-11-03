@@ -29,8 +29,13 @@ const baseEnv = (() => {
   return e;
 })();
 let env;
+// The tests never use this PC's ITP folder: one of their own, with one team skill (a test that needs repos makes a
+// fake ITP with git repos).
+const testItp = path.join(tmp, 'itp-base').replace(/\\/g, '/');
+fs.mkdirSync(path.join(testItp, '.claude', 'skills', 'review-changes'), { recursive: true });
+fs.writeFileSync(path.join(testItp, '.claude', 'skills', 'review-changes', 'SKILL.md'), '---\nname: review-changes\ndescription: a team skill\n---\nReview.\n');
 function useEnv(extra = {}) {
-  env = { ...baseEnv, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
+  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
 }
 useEnv();
 
@@ -359,9 +364,7 @@ test('skills list includes Orchestra test skills and team skills', async () => {
   const { body } = await api('GET', '/api/skills');
   const names = body.map((s) => s.name);
   assert.ok(names.includes('orchestra-hello') && names.includes('orchestra-recap'));
-  if (fs.existsSync('C:\\Workstation\\Workspace\\ITP\\.claude\\skills\\review-changes')) {
-    assert.equal(body.find((s) => s.name === 'review-changes')?.source, 'team');
-  }
+  assert.equal(body.find((s) => s.name === 'review-changes')?.source, 'team', 'a skill of the ITP folder');
   assert.ok(!names.some((n) => n.startsWith('_')), 'folders starting with _ are skipped');
   // Many runs stay open in these tests; give them room.
   assert.equal((await api('PUT', '/api/settings', { maxRunning: 20 })).status, 200);
@@ -402,7 +405,7 @@ test('a run opens a terminal tab; its launcher gets the session, the hooks and t
   const rules = a[a.indexOf('--append-system-prompt') + 1];
   assert.match(rules, /ORCHESTRA:DONE/);
   assert.match(rules, /Tracking is OFF/, 'the demo template has tracking off');
-  assert.equal(a[a.indexOf('--add-dir') + 1], 'C:/Workstation/Workspace/ITP', 'the real ITP folder, behind the links');
+  assert.equal(a[a.indexOf('--add-dir') + 1].replace(/\\/g, '/'), testItp, 'the ITP folder from the setup, behind the links');
   assert.ok(a[a.indexOf('--add-dir') + 2].startsWith('--'), '--add-dir takes several folders: a flag must follow it, not the prompt');
   assert.equal(spec.env.ORCHESTRA_RUN_ID, run.id);
   assert.equal(spec.env.ORCHESTRA_HOOK_TOKEN, run.hookToken);
@@ -661,6 +664,7 @@ test('pins: Claude pins steps, you pin answers and notes; the pane shows and scr
   assert.equal(lines.length, 24, 'fits the pane');
   assert.ok(lines.every((l) => l.replace(/\x1b\[[\d;]*m/g, '').length <= 39), 'no line is wider than the pane');
   assert.match(out, /Pinned 4\/4 · Test steps/);
+  assert.equal(lines[lines.findIndex((l) => /Pinned 4\/4/.test(l)) - 1], '', 'an empty line keeps the pin apart');
   assert.match(out, /1\. Open Pillar 2 → GIR/, 'markdown marks dropped');
   assert.match(out, /↓ \d+ more/);
   assert.match(out, /←→ pins/);
@@ -839,12 +843,272 @@ test('app: start stops the app of the run before, starts this run\'s, and leaves
   }
 });
 
+test('launcher: the AppHost gets the run\'s resource list, keeps your own settings, and leaves the brokers off when they run', async () => {
+  const L = await import('../lib/launcher.mjs');
+  const saved = { start: process.env.ORCHESTRA_APP_START, mission: process.env.ITP_MissionApis };
+  delete process.env.ORCHESTRA_APP_START;
+  const ws = path.join(tmp, 'ws-apphost');
+  const host = L.apphostDir(ws);
+  fs.mkdirSync(host, { recursive: true });
+  fs.writeFileSync(path.join(host, 'Orbitax.AppHost.csproj'), '<Project />');
+  fs.writeFileSync(path.join(host, 'appsettings.local.json'), `{
+  // mine
+  "AppHost": { "SqaDatabase": false, "Url": "http://x//y", "Resources": {
+    "webclient": { "enabled": true, "scriptName": "mine" }, // my script
+    "platform": { "enabled": false, "env": { "A__B": "1" } },
+    "website-api": { "enabled": true },
+  } }
+}`);
+  try {
+    process.env.ITP_MissionApis = '';
+    assert.ok(!L.defaultServices('apphost', ws).includes('mission'), 'no Mission consumer on this branch');
+    fs.mkdirSync(path.join(ws, 'ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer'), { recursive: true });
+    const services = L.defaultServices('apphost', ws);
+    assert.deepEqual(services, ['webclient', 'api', 'primary', 'secondary', 'spreadsheet', 'scheduler', 'mcp', 'idp', 'mission']);
+    process.env.ITP_MissionApis = ',';
+    assert.ok(!L.defaultServices('apphost', ws).includes('mission'), 'MissionApis="," keeps XatBot on Primary');
+
+    const cmd = L.startCommand('apphost', ws, services, { brokersRunning: true });
+    assert.deepEqual([cmd.exe, ...cmd.args], ['dotnet', 'run', '--project', 'Applications/Orbitax.AppHost', '--launch-profile', 'http']);
+    assert.equal(path.resolve(cmd.cwd).toLowerCase(), path.resolve(ws, 'ITP-API/Orbitax.Platform.Api').toLowerCase());
+    assert.equal(cmd.env.ASPIRE_ALLOW_UNSECURED_TRANSPORT, 'true');
+    const written = JSON.parse(fs.readFileSync(path.join(host, 'appsettings.local.json'), 'utf8'));
+    const res = written.AppHost.Resources;
+    for (const on of ['webclient', 'platform', 'primary', 'secondary', 'spreadsheetjob', 'scheduler', 'mcp-consumer', 'teamspace-agent', 'mission']) assert.equal(res[on].enabled, true, on);
+    for (const off of ['redis', 'rabbitmq', 'website-api']) assert.equal(res[off].enabled, false, off);
+    assert.equal(res.webclient.scriptName, 'mine', 'your webclient script is kept');
+    assert.deepEqual(res.platform.env, { A__B: '1' }, 'your env is kept');
+    assert.equal(written.AppHost.Url, 'http://x//y', '// inside a string is not a comment');
+    L.startCommand('apphost', ws, ['api'], { brokersRunning: false });
+    const again = JSON.parse(fs.readFileSync(path.join(host, 'appsettings.local.json'), 'utf8')).AppHost.Resources;
+    assert.deepEqual([again.redis.enabled, again.rabbitmq.enabled, again.webclient.enabled], [true, true, false], 'brokers on when nothing serves them');
+
+    assert.equal(L.serviceName('Platform'), 'api');
+    assert.equal(L.serviceName('spreadsheetjob'), 'spreadsheet');
+    assert.throws(() => L.serviceName('nope'), /unknown service/);
+    assert.deepEqual(L.unsupported('runstack', services), ['scheduler', 'mcp', 'idp', 'mission']);
+    assert.throws(() => L.startCommand('runstack', ws, ['api']), /no run-stack\.ps1.*launcher=apphost/);
+    assert.throws(() => L.startCommand('apphost', path.join(tmp, 'ws-old'), ['api']), /no Aspire AppHost.*launcher=runstack/);
+    assert.deepEqual(L.restartCommand('apphost', ws, ['api']), { full: true });
+    assert.match(L.restartCommand('runstack', ws, ['api', 'primary']).args.at(-1), /-Restart -Only api,primary$/);
+  } finally {
+    for (const [k, v] of [['ORCHESTRA_APP_START', saved.start], ['ITP_MissionApis', saved.mission]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
+test('launcher: orch settings picks it; app start, restart and logs use it; stop also ends hosts with no port', async () => {
+  assert.equal((await orch('settings')).body.launcher, 'apphost', 'the AppHost by default');
+  assert.equal((await orch('settings', 'launcher=runstack')).body.launcher, 'runstack');
+  assert.match((await orchText('settings')).out, /the app starts with: run-stack\.ps1/);
+  assert.equal((await orch('settings', 'launcher=docker')).status, 400);
+  await orch('settings', 'launcher=apphost');
+
+  const a = await startRun();
+  let jobless;
+  try {
+    await app(a, 'take', '--minutes', '0');
+    const s1 = await app(a, 'start', '--services', 'webclient,platform', '--with', 'mission', '--minutes', '0.5');
+    assert.equal(s1.code, 0, s1.err + s1.out);
+    assert.match(s1.out, /with the Aspire AppHost/);
+    assert.match(s1.out, /Mission consumer \(:50550\)/);
+    const serving = JSON.parse(fs.readFileSync(path.join(dataDir, 'app.json'), 'utf8'));
+    assert.deepEqual([serving.launcher, serving.services], ['apphost', ['webclient', 'api', 'mission']]);
+    const ws = serving.workspace;
+    fs.writeFileSync(path.join(ws, '.run-logs', 'api.log'), 'one\ntwo\nfail: boom\n');
+    assert.match((await app(a, 'logs')).out, /api\.log/);
+    assert.match((await app(a, 'logs', 'api', '--lines', '1')).out, /^fail: boom/);
+    assert.notEqual((await app(a, 'logs', 'nope')).code, 0);
+
+    // A restart (a custom start: the whole app again) keeps the services.
+    const r = await app(a, 'restart', '--minutes', '0.5');
+    assert.equal(r.code, 0, r.err + r.out);
+    assert.match(r.out, /Restarting the whole app/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'app.json'), 'utf8')).services, ['webclient', 'api', 'mission']);
+
+    // A host with no port, from the run's folder (like the Spreadsheet Job): stop ends it too.
+    jobless = spawn(process.execPath, [path.join(ROOT, 'test/fake-app.mjs'), path.join(ws, 'Orbitax.Spreadsheet.Job')], { env: { ...env, ORCHESTRA_APP_PORTS: '' }, stdio: 'ignore' });
+    await new Promise((ok) => setTimeout(ok, 500));
+    assert.match((await app(null, 'stop')).out, /stopped/);
+    await waitFor(() => jobless.exitCode !== null || jobless.signalCode !== null, 'the host with no port to stop');
+  } finally {
+    await app(null, 'stop', '--force');
+    jobless?.kill();
+    await close(a);
+  }
+});
+
+test('log copier: Aspire\'s per-service consoles become plain .run-logs/<service>.log files; stop ends the copier', async () => {
+  const L = await import('../lib/launcher.mjs');
+  assert.equal(L.dcpLine('12 2026-11-03T11:25:24.801Z \x1b[40m\x1b[31mfail\x1b[39m\x1b[22m\x1b[49m: Boom[0]'), 'fail: Boom[0]');
+  assert.deepEqual([L.logNameOf('platform'), L.logNameOf('spreadsheetjob'), L.logNameOf('mission'), L.logNameOf('website-api')], ['api', 'spreadsheet', 'mission', 'website-api']);
+
+  const session = path.join(tmp, 'dcp-session');
+  fs.mkdirSync(session, { recursive: true });
+  const resource = (id, name) => fs.writeFileSync(path.join(session, `resource-executable-${id}.log`), `x\tinfo\tExecutableReconciler\tStarting process...\t{"Executable": "/${name}", "Cmd": "dotnet"}\n`);
+  resource('aaa', 'platform-tntkkttu');
+  resource('bbb', 'primary-fqwfnhzn');
+  fs.writeFileSync(path.join(session, 'aaa_out'), '1 2026-11-03T11:25:24.801Z \x1b[32minfo\x1b[39m: started\n');
+  fs.writeFileSync(path.join(session, 'bbb_err'), '');
+  const run = await startRun();
+  const extra = { ...appEnv(run), ORCHESTRA_DCP_SESSION: session };
+  const appX = (...args) => proc([path.join(ROOT, 'bin/app.mjs'), ...args], { extraEnv: extra });
+  try {
+    await appX('take', '--minutes', '0');
+    const s = await appX('start', '--minutes', '0.5');
+    assert.equal(s.code, 0, s.err + s.out);
+    assert.match(s.out, /dev IdP .* cannot start: no teamspace-agent folder/, 'a missing IdP is named');
+    const serving = JSON.parse(fs.readFileSync(path.join(dataDir, 'app.json'), 'utf8'));
+    assert.ok(!serving.services.includes('idp'), 'started without the IdP');
+    const logs = path.join(serving.workspace, '.run-logs');
+    await waitFor(() => fs.existsSync(path.join(logs, 'api.log')) && fs.readFileSync(path.join(logs, 'api.log'), 'utf8') === 'info: started\n', 'api.log from the copier');
+    // Lines come as they are written, half lines wait for their end; a restarted service's new file is read too.
+    fs.appendFileSync(path.join(session, 'aaa_out'), '2 2026-11-03T11:25:25.000Z fail: Boom\n3 2026-11-03T11:25:25.100Z half');
+    fs.appendFileSync(path.join(session, 'bbb_err'), '1 2026-11-03T11:25:25.000Z Unhandled exception\n');
+    resource('ccc', 'platform-tntkkttu');
+    fs.writeFileSync(path.join(session, 'ccc_out'), '1 2026-11-03T11:26:00.000Z info: again\n');
+    await waitFor(() => /again/.test(fs.readFileSync(path.join(logs, 'api.log'), 'utf8')), 'the new file');
+    assert.equal(fs.readFileSync(path.join(logs, 'api.log'), 'utf8'), 'info: started\nfail: Boom\ninfo: again\n');
+    assert.equal(fs.readFileSync(path.join(logs, 'primary.log'), 'utf8'), 'Unhandled exception\n');
+    assert.match((await appX('logs')).out, /Live logs: .*\.run-logs\/api\.log/);
+    const copier = serving.pids[1];
+    assert.match((await app(null, 'stop')).out, /stopped/);
+    await waitFor(() => { try { process.kill(copier, 0); return false; } catch { return true; } }, 'the copier to end');
+  } finally {
+    await app(null, 'stop', '--force');
+    await close(run);
+  }
+});
+
+test('app for you: orch app start serves your own checkout; runs wait for you; a run that has the app is never pushed out', async () => {
+  const fake = { ORCHESTRA_APP_PORTS: APP_PORTS, ORCHESTRA_APP_START: appEnv({}).ORCHESTRA_APP_START };
+  const you = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), 'app', ...args], { extraEnv: fake });
+  const run = await startRun();
+  try {
+    const s = await you('start', '--minutes', '0.5');
+    assert.equal(s.code, 0, s.err + s.out);
+    assert.match(s.out, /Starting the app from .*itp-base/);
+    assert.match(s.out, /The app is up/);
+    const serving = JSON.parse(fs.readFileSync(path.join(dataDir, 'app.json'), 'utf8'));
+    assert.deepEqual([serving.runId, serving.title], ['you', 'you (your checkout)']);
+    assert.match((await you()).out, /App: you have it \(your own checkout/);
+    assert.match((await you()).out, /Serving: your checkout from .*itp-base/);
+    // A run that wants the app waits for you.
+    const t = await app(run, 'take', '--minutes', '0');
+    assert.equal(t.code, 3);
+    assert.match(t.out, /the user runs their own app/);
+    // Your app: restart and stop work; stop lets go, and the run gets it.
+    assert.equal((await you('restart', '--minutes', '0.5')).code, 0);
+    assert.match((await you('stop')).out, /stopped/);
+    assert.equal(await appUp(), false);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'app-you.json')), 'you let go');
+    assert.match((await app(run, 'take', '--minutes', '0')).out, /You have the app/);
+    // Now the run has it: your start is refused, and says which run and what it does.
+    const refused = await you('start', '--minutes', '0.5');
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.err, /run demo has the app \(working in its step "Say hello"\)\. Wait until it lets go, or take it from the run: orch app release demo/);
+    assert.equal(await appUp(), false, 'nothing started');
+  } finally {
+    await you('stop', '--force');
+    await close(run);
+  }
+});
+
+test('app: stop knows the AppHost\'s app as its own, though Aspire\'s DCP holds the ports and names only its temp folder', async () => {
+  const session = path.join(tmp, 'dcp-owner-session');
+  fs.mkdirSync(session, { recursive: true });
+  const ws = path.join(tmp, 'ws-dcp');
+  fs.mkdirSync(ws, { recursive: true });
+  // Like dcp.exe run-controllers: listens on the app's ports; its command line has the session folder, not the workspace.
+  const dcp = spawn(process.execPath, [path.join(ROOT, 'test/fake-app.mjs'), 'run-controllers', '--kubeconfig', path.join(session, 'kubeconfig')], { env: { ...env, ORCHESTRA_APP_PORTS: APP_PORTS }, stdio: 'ignore' });
+  try {
+    await waitFor(appUp, 'the fake DCP to listen');
+    fs.writeFileSync(path.join(dataDir, 'app.json'), JSON.stringify({ runId: 'you', title: 'you (your checkout)', workspace: ws, launcher: 'apphost', services: [], pids: [], startedAt: new Date().toISOString() }));
+    const stop = await proc([path.join(ROOT, 'bin/app.mjs'), 'stop'], { extraEnv: { ORCHESTRA_APP_PORTS: APP_PORTS, ORCHESTRA_DCP_SESSION: session } });
+    assert.equal(stop.code, 0, stop.err + stop.out);
+    assert.match(stop.out, /stopped/);
+    await waitFor(async () => !(await appUp()), 'the ports to close');
+  } finally {
+    dcp.kill();
+  }
+});
+
+test('app: stop leaves an editor that has the folder open alone (only the app\'s own processes)', async () => {
+  const { hostsIn } = await import('../lib/app.mjs');
+  const ws = path.join(tmp, 'ws-editor');
+  fs.mkdirSync(ws, { recursive: true });
+  // An "editor" that names the folder and an Orbitax solution, and a host started with dotnet run from it.
+  const editor = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', path.join(ws, 'Orbitax.Platform.Api.slnx')], { stdio: 'ignore' });
+  const host = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)', 'dotnet', 'run', '--project', path.join(ws, 'Orbitax.Scheduler.Api.csproj')], { stdio: 'ignore' });
+  try {
+    await new Promise((ok) => setTimeout(ok, 500));
+    const pids = hostsIn(ws).map((p) => p.pid);
+    assert.ok(pids.includes(host.pid), 'the host is the app');
+    assert.ok(!pids.includes(editor.pid), 'the editor is not');
+  } finally {
+    editor.kill();
+    host.kill();
+  }
+});
+
+test('app: health asks 127.0.0.1 first (the api listens on IPv4 only)', async () => {
+  const v4 = spawn(process.execPath, [path.join(ROOT, 'test/fake-app.mjs'), 'v4'], { env: { ...env, ORCHESTRA_APP_PORTS: APP_PORTS, FAKE_APP_HOST: '127.0.0.1' }, stdio: 'ignore' });
+  try {
+    await waitFor(async () => { try { return (await fetch('http://127.0.0.1:47811/health')).ok; } catch { return false; } }, 'the IPv4 app');
+    assert.match((await app(null, 'status')).out, /Answers: api yes · web yes/);
+  } finally {
+    v4.kill();
+  }
+});
+
+test('setup: a fresh clone learns the ITP folder, gets the starter templates and its skills, and says what is missing', async () => {
+  const home = path.join(tmp, 'fresh-home');
+  const data = path.join(tmp, 'fresh-data');
+  const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '' } });
+  const none = await fresh('status');
+  assert.notEqual(none.code, 0);
+  assert.match(none.err, /does not know your ITP folder yet\. Run: node .*bin\/orch\.mjs setup --itp/);
+  assert.match((await fresh('setup', '--itp', tmp)).err, /has no \.claude\/skills folder/);
+  const s = await fresh('setup', '--itp', testItp, '--email', 'dev@example.com');
+  assert.equal(s.code, 0, s.err + s.out);
+  assert.match(s.out, /ITP folder: .*itp-base/);
+  assert.match(s.out, /dev@example\.com/);
+  assert.ok(fs.existsSync(path.join(data, 'templates', 'feature-template.json')), 'starter templates copied');
+  const skill = fs.readFileSync(path.join(home, 'orchestra', 'SKILL.md'), 'utf8');
+  assert.ok(!skill.includes('{{'), 'placeholders filled');
+  assert.ok(skill.includes(`node ${ROOT.replace(/\\/g, '/')}/bin/orch.mjs`), 'names this clone');
+  assert.ok(fs.existsSync(path.join(home, 'orchestra-app-test', 'SKILL.md')));
+  // Now it works, and a second setup changes nothing of yours.
+  assert.equal((await fresh('status')).code, 0);
+  fs.writeFileSync(path.join(data, 'templates', 'feature-template.json'), '{"mine": true}');
+  fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit\n');
+  const again = await fresh('setup');
+  assert.match(again.out, /orchestra: updated \(your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d\)/);
+  assert.match(again.out, /orchestra-app-test: up to date/);
+  assert.equal(fs.readFileSync(path.join(data, 'templates', 'feature-template.json'), 'utf8'), '{"mine": true}', 'your template is kept');
+  // A second hand edit the same day gets its own backup, never over the first.
+  fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit 2\n');
+  assert.match((await fresh('setup')).out, /your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d-2\)/);
+  // A copy setup installed itself (a pull changed the repo's text) is just replaced: no backup.
+  const notes = JSON.parse(fs.readFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), 'utf8'));
+  fs.writeFileSync(path.join(home, 'orchestra', 'SKILL.md'), 'older text from setup\n');
+  notes['SKILL.md'] = (await import('node:crypto')).createHash('sha256').update('older text from setup\n').digest('hex');
+  fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), JSON.stringify(notes));
+  assert.match((await fresh('setup')).out, /orchestra: updated\n/);
+});
+
 test('a "wait for me" box stops the run; next goes on; you are notified', async () => {
   const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   assert.deepEqual((await hook(run, 'Stop', done('hello'))).body, {}, 'Claude stops at the gate');
   let now = await getRun(run.id);
   assert.equal(now.status, 'waiting');
   assert.equal(now.waitingAfter, 'hello');
+  // The pane: "Type next or redo" has its own color (not the pin's cyan) and an empty line before the pin.
+  await orch('pin', run.id, 'step one');
+  const pane = (await proc([path.join(ROOT, 'bin/orch.mjs'), 'watch', run.id, '--once', '--rows', '30', '--cols', '40'])).out.split('\n');
+  const hintAt = pane.findIndex((l) => l.includes('Type next or redo'));
+  assert.ok(pane[hintAt].startsWith('\x1b[1;33m'), 'bold yellow');
+  assert.deepEqual([pane[hintAt + 1], /Pinned/.test(pane[hintAt + 2])], ['', true]);
+  await orch('unpin', run.id, 'all');
   assert.ok((await logs(run)).includes('notification (off): is waiting for you: type next in its terminal'));
   assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 409, 'the browser points you to the terminal');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-recap/);

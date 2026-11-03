@@ -42,7 +42,7 @@ Two runs work at once (`/orchestra settings max=3` to change). The rest wait in 
 | anything else | Normal chat with that run's Claude |
 
 **Right pane:** steps on top, pins below. Claude pins test steps by itself. Click the pane, then
-↑ ↓ PgUp PgDn or the mouse wheel scroll the pin; ← → show other pins. Select text there with **Shift + drag**.
+↑ ↓ PgUp PgDn or the mouse wheel scroll the pin; ← → show other pins. Select text there with a plain drag.
 Wider pane: `/orchestra settings panesize=40` (new tabs).
 
 ## Wrap up (last step): type `next` when the ticket is fully done

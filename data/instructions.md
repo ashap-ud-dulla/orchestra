@@ -1,2 +1,0 @@
-- If a test also fails on the base branch without our change, call it a pre-existing failure and don't let it block the review.
-- When a build finishes, clearly list what is still owed (like the app check on localhost:9000) so it is not forgotten before the PR.

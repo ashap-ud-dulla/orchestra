@@ -4,5 +4,9 @@ import http from 'node:http';
 
 for (const pair of (process.env.ORCHESTRA_APP_PORTS || '').split(',').filter(Boolean)) {
   const port = Number(pair.split('=')[1]);
-  http.createServer((req, res) => res.end(req.url === '/health' ? 'ok' : `fake app from ${process.argv[2] || '?'}`)).listen(port);
+  // FAKE_APP_HOST=127.0.0.1 listens on IPv4 only, as the real api does.
+  http.createServer((req, res) => res.end(req.url === '/health' ? 'ok' : `fake app from ${process.argv[2] || '?'}`)).listen(port, process.env.FAKE_APP_HOST);
 }
+
+// With no ports (a host like the Spreadsheet Job), it still runs until it is killed.
+setInterval(() => {}, 1 << 30);

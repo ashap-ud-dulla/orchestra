@@ -1,4 +1,4 @@
 runs/
 worktrees/
-data/orchestra.lock
+data/
 node_modules/

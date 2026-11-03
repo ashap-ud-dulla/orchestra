@@ -1,10 +1,15 @@
 // The app, one run at a time: node bin/app.mjs <command>
 // A run's Claude calls this from its "Test in the app" step (the orchestra-app-test skill), inside its own workspace.
 // Only one copy of the ITP app can run (fixed ports), so runs wait in line for it, first come first served.
+// Outside a run (orch app start|stop|restart|wait|logs|release), it is you: the app serves your own ITP checkout
+// (the setup's ITP folder), and you hold it until orch app stop. A run that has the app is never pushed out.
 //   build             build this run's code before its turn (no ports, no waiting)
 //   take [--minutes N] join the line and wait for the app (N minutes at most, default 1.5; run it again if still waiting)
-//   start [--workers] [--force]  stop the app that runs now, start it from this run's workspace, wait until it answers
+//   start [--services a,b] [--with a,b] [--force]  stop the app that runs now, start it from this run's workspace
+//                     with the launcher setting (apphost or runstack), wait until it answers
+//   restart [services] restart the app this run started (after a Debug.json switch or a code change)
 //   wait [--minutes N] wait more for an app that is still starting
+//   logs [service]    the log files there are, or the last lines of one: <ws>/.run-logs/<service>.log
 //   release           let go of the app (it keeps running until the next run starts its own)
 //   stop [--force]    stop the app
 //   status            who has the app, who waits, and whose code it serves
@@ -14,13 +19,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { withRunner } from '../lib/runner.mjs';
 import { tabTitle } from '../lib/terminal.mjs';
-import { appPorts, readServing, writeServing, portOwners, processInfo, norm, stackPids, stopApp } from '../lib/app.mjs';
+import { appPorts, readServing, writeServing, portOwners, processInfo, norm, stackPids, stopApp, brokersListening, readYourHold, writeYourHold, YOU, hostsIn } from '../lib/app.mjs';
+import { config } from '../lib/config.mjs';
+import * as launcher from '../lib/launcher.mjs';
 
 const NOT_MINE = 5; // exit code: the app runs from somewhere Orchestra did not start it
 
 const args = process.argv.slice(2);
 const cmd = args[0] || 'status';
 const flag = (name) => args.includes(`--${name}`);
+const option = (name) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : null;
+};
+// The words after the command that are not options or their values.
+const positional = (from) => args.slice(from).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--') && ['--minutes', '--services', '--with', '--lines'].includes(all[i - 1])));
+const list = (text) => [...new Set(String(text || '').split(/[\s,]+/).filter(Boolean).map(launcher.serviceName))];
 const minutes = () => {
   const i = args.indexOf('--minutes');
   const n = i >= 0 ? Number(args[i + 1]) : 1.5;
@@ -44,12 +58,42 @@ function needRun() {
 async function me() {
   return withRunner((r) => {
     const run = r.mustToken(runId, token);
-    return JSON.parse(JSON.stringify({ run, app: r.appState(runId) }));
+    return JSON.parse(JSON.stringify({ run, app: r.appState(runId), launcher: r.getSettings().launcher || launcher.DEFAULT_LAUNCHER }));
   });
 }
 
 function workspaceOf(run) {
   return run.workspace?.ready ? run.workspace.dir : run.cwd;
+}
+
+const inRun = () => !!(runId && token);
+const actorId = () => (inRun() ? runId : YOU);
+
+// Who is starting the app, as { id, title, ws, branches }: this run, or you (your own ITP checkout).
+function actorOf(mine) {
+  if (mine.run) {
+    const run = mine.run;
+    return { id: run.id, title: tabTitle(run), ws: workspaceOf(run), branches: (run.workspace?.repos || []).map((r) => `${r.folder || r.token}: ${r.branch || `${r.base} (no branch)`}`).join(', ') };
+  }
+  const ws = config.itpRoot;
+  const branch = (dir) => spawnSync('git', ['-C', path.join(ws, dir), 'branch', '--show-current'], { encoding: 'utf8', windowsHide: true }).stdout?.trim();
+  const branches = ['ITP-API', 'ITP-WebClient'].filter((d) => fs.existsSync(path.join(ws, d))).map((d) => `${d}: ${branch(d) || '(no branch)'}`).join(', ');
+  return { id: YOU, title: 'you (your checkout)', ws, branches };
+}
+
+// Outside a run: takes the app for you, unless a run has it (then it says which run, and what it does).
+async function takeForYou() {
+  if (!config.itpRoot) fail(`Orchestra does not know your ITP folder yet. Run: node ${path.join(config.root, 'bin', 'orch.mjs').replace(/\\/g, '/')} setup --itp <your ITP folder>`);
+  return withRunner((r) => {
+    const app = JSON.parse(JSON.stringify(r.appState()));
+    const h = app.holder;
+    if (h && !h.you) {
+      const doing = h.waitingForYou ? 'waiting for you after its step: type next in its tab to hand the app on' : `working in its step${h.step ? ` "${h.step}"` : ''}`;
+      fail(`run ${h.title} has the app (${doing}). Wait until it lets go, or take it from the run: orch app release ${h.title}`);
+    }
+    if (!h) writeYourHold({ at: new Date().toISOString(), workspace: config.itpRoot });
+    return { app: { ...app, has: true }, launcher: r.getSettings().launcher || launcher.DEFAULT_LAUNCHER };
+  });
 }
 
 // ---------- the app's health ----------
@@ -65,20 +109,25 @@ async function answers(url, ok200) {
 
 async function health() {
   const p = appPorts();
-  const api = p.api ? await answers(`http://localhost:${p.api}/health`, true) : true;
-  const web = p.web ? await answers(`http://localhost:${p.web}/`, false) : true;
+  // 127.0.0.1 first: Node may take localhost as IPv6 (::1) while the api listens on IPv4 only. localhost second:
+  // ng serve may listen on [::1] only.
+  const either = async (port, rest, ok200) => (await answers(`http://127.0.0.1:${port}${rest}`, ok200)) || answers(`http://localhost:${port}${rest}`, ok200);
+  const api = p.api ? await either(p.api, '/health', true) : true;
+  const web = p.web ? await either(p.web, '/', false) : true;
   return { api, web, up: api && web };
 }
 
-function logTail(ws) {
-  const dir = path.join(ws, '.run-logs');
-  const lines = [];
+function tail(file, n) {
   try {
-    for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.log'))) {
-      const text = fs.readFileSync(path.join(dir, name), 'utf8').trimEnd().split('\n').slice(-8);
-      lines.push(`--- ${name}`, ...text);
-    }
-  } catch {}
+    return fs.readFileSync(file, 'utf8').trimEnd().split('\n').slice(-n);
+  } catch {
+    return [];
+  }
+}
+
+function logTail(ws) {
+  const lines = [];
+  for (const [name, file] of Object.entries(launcher.serviceLogs(ws))) lines.push(`--- ${name}.log`, ...tail(file, 8));
   return lines.join('\n') || '(no logs yet)';
 }
 
@@ -109,7 +158,7 @@ const commands = {
     const [exe, ...rest] = custom ? JSON.parse(custom.replaceAll('{ws}', ws.replace(/\\/g, '/'))) : ['dotnet', 'build', proj, '-nologo', '-v', 'q'];
     if (!custom && !fs.existsSync(proj)) return say('Nothing to build here (no ITP-API in this workspace). The webclient builds when the app starts.');
     say(`Building ${ws} …`);
-    const r = spawnSync(exe, rest, { cwd: ws, stdio: 'inherit', windowsHide: true });
+    const r = spawnSync(exe, rest, { cwd: ws, stdio: 'inherit', windowsHide: true, env: { ...process.env, ...launcher.BUILD_ENV } });
     if (r.status !== 0) fail('the build failed (see above). Fix it before you take the app.', r.status || 1);
     say('Built. The webclient compiles when the app starts. Next: take the app.');
   },
@@ -125,7 +174,8 @@ const commands = {
         say(`You have the app.${serving ? ` It serves ${serving.title}'s code now: start it from this run.` : ' Start it from this run.'}`);
         return;
       }
-      if (app.place !== lastPlace) say(`Waiting for the app: ${ordinal(app.place)} in line${app.holder ? ` (${app.holder.title} has it${app.holder.waitingForYou ? ', waiting for the user' : ''})` : ''}.`);
+      const who = app.holder?.you ? ' (the user runs their own app: wait, or ask them to stop it with orch app stop)' : app.holder ? ` (${app.holder.title} has it${app.holder.waitingForYou ? ', waiting for the user' : ''})` : '';
+      if (app.place !== lastPlace) say(`Waiting for the app: ${ordinal(app.place)} in line${who}.`);
       lastPlace = app.place;
       if (Date.now() >= end) {
         say('Still waiting. Run take again to keep your place.');
@@ -136,10 +186,11 @@ const commands = {
   },
 
   async start() {
-    needRun();
-    const { run, app } = await me();
-    if (!app.has) fail('this run does not have the app. Run take first.');
-    const ws = workspaceOf(run);
+    const mine = inRun() ? await me() : await takeForYou();
+    if (!mine.app.has) fail('this run does not have the app. Run take first.');
+    const actor = actorOf(mine);
+    const ws = actor.ws;
+    const serving0 = readServing(); // stopping forgets it; a start after a fix keeps its services
     say(`Stopping the app that runs now${readServing() ? ` (${readServing().title})` : ''} …`);
     const stopped = await stopApp({ force: flag('force') });
     if (stopped.refused) {
@@ -150,33 +201,72 @@ const commands = {
     }
     if (Object.keys(stopped.left).length) fail(`these ports are still busy: ${Object.keys(stopped.left).join(', ')}`);
 
-    const keys = ['webclient', 'api', 'outsider', ...(flag('workers') ? ['primary', 'secondary', 'spreadsheet'] : [])];
-    const custom = process.env.ORCHESTRA_APP_START;
-    const script = path.join(ws, 'run-stack.ps1');
-    if (!custom && !fs.existsSync(script)) fail(`no run-stack.ps1 in ${ws}`);
-    const [exe, ...rest] = custom
-      ? JSON.parse(custom.replaceAll('{ws}', ws.replace(/\\/g, '/')))
-      : ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `& '${script}' -Only ${keys.join(',')}`];
-    fs.mkdirSync(path.join(ws, '.run-logs'), { recursive: true });
-    const out = fs.openSync(path.join(ws, '.run-logs', 'orchestra-start.log'), 'w');
-    const child = spawn(exe, rest, { cwd: ws, detached: true, stdio: ['ignore', out, out], windowsHide: true });
+    const services = pickServices(mine.launcher, ws, serving0);
+    await launch(actor, ws, mine.launcher, services);
+  },
+
+  async restart() {
+    const mine = inRun() ? await me() : { app: { has: !!readYourHold() } };
+    const serving = readServing();
+    if (!mine.app.has) fail(inRun() ? 'this run does not have the app. Run take first.' : 'you do not have the app. Start it: orch app start');
+    if (!serving || serving.runId !== actorId()) fail(`the app was not started by ${inRun() ? 'this run' : 'you'}. Start it first.`);
+    const actor = inRun() ? actorOf(mine) : actorOf({});
+    const ws = serving.workspace;
+    const how = serving.launcher || launcher.DEFAULT_LAUNCHER;
+    const named = positional(1);
+    const services = named.length ? list(named.join(',')) : serving.services;
+    const cmd = launcher.restartCommand(how, ws, services);
+    if (cmd.full) {
+      say(`Restarting the whole app${how === 'apphost' ? ' (the AppHost restarts one service only through the aspire CLI, which is not set up here)' : ''}. The relaunch rebuilds what changed.`);
+      const stopped = await stopApp({ force: false });
+      if (stopped.refused) fail('the app on its ports was not started by Orchestra. Run start --force after the user says ok.', NOT_MINE);
+      await launch(actor, ws, how, serving.services);
+      return;
+    }
+    say(`Restarting ${services.join(', ')} …`);
+    fs.mkdirSync(launcher.logsDir(ws), { recursive: true });
+    const out = fs.openSync(path.join(launcher.logsDir(ws), 'orchestra-restart.log'), 'w');
+    const child = spawn(cmd.exe, cmd.args, { cwd: cmd.cwd, env: { ...process.env, ...cmd.env }, detached: true, stdio: ['ignore', out, out], windowsHide: true });
     child.unref();
-    const branches = (run.workspace?.repos || []).map((r) => `${r.folder || r.token}: ${r.branch || `${r.base} (no branch)`}`).join(', ');
-    writeServing({ runId: run.id, title: tabTitle(run), workspace: ws, branches, services: keys, pids: [child.pid], startedAt: new Date().toISOString() });
-    say(`Starting the app from ${ws} (${keys.join(', ')}). A cold start can take many minutes.`);
+    writeServing({ ...serving, pids: [...new Set([...(serving.pids || []), child.pid])] });
+    await sleep(5000); // let the old processes go before the up-check
     await finishStart(ws);
   },
 
-  async wait() {
-    needRun();
+  async logs() {
     const serving = readServing();
-    if (!serving || serving.runId !== runId) fail('the app was not started by this run. Run start.');
+    let ws = serving?.workspace;
+    if (runId && token) ws = workspaceOf((await me()).run);
+    if (!ws) fail('no app was started by Orchestra, and this is not a run.');
+    const files = launcher.serviceLogs(ws);
+    const want = positional(1)[0];
+    if (want) {
+      let file = files[want];
+      if (!file) {
+        try {
+          file = files[launcher.serviceName(want)];
+        } catch {}
+      }
+      if (!file) fail(`no ${want}.log in ${launcher.logsDir(ws)}. There are: ${Object.keys(files).join(', ') || 'none'}`);
+      say(tail(file, Number(option('lines')) || 40).join('\n'));
+      return;
+    }
+    say(`Logs in ${launcher.logsDir(ws)}:`);
+    for (const [name, file] of Object.entries(files)) say(`  ${name}.log  (${fs.statSync(file).size} bytes)`);
+    if (!Object.keys(files).length) say('  none yet');
+    say(logNote(ws, serving));
+  },
+
+  async wait() {
+    const serving = readServing();
+    if (!serving || serving.runId !== actorId()) fail(`the app was not started by ${inRun() ? 'this run' : 'you'}. Start it first.`);
     await finishStart(serving.workspace);
   },
 
   async release() {
-    needRun();
-    await withRunner((r) => r.appRelease(runId, token));
+    if (inRun()) await withRunner((r) => r.appRelease(runId, token));
+    else if (readYourHold()) writeYourHold(null);
+    else return say('You do not hold the app.');
     say('Let go of the app. It keeps running until the next run starts its own.');
   },
 
@@ -192,14 +282,18 @@ const commands = {
       say('Run stop --force to stop it anyway.');
       process.exit(NOT_MINE);
     }
+    if (!inRun() && readYourHold()) writeYourHold(null); // you let go: runs waiting for the app go on
     say('The app is stopped.');
   },
 
   async status() {
-    const app = await withRunner((r) => r.appState());
+    const { app, how } = await withRunner((r) => JSON.parse(JSON.stringify({ app: r.appState(), how: r.getSettings().launcher || launcher.DEFAULT_LAUNCHER })));
     const serving = readServing();
     const h = await health();
     say(appText(app, serving, h));
+    say(`Starts with: ${how}${serving?.launcher && serving.launcher !== how ? ` (the app now was started with ${serving.launcher})` : ''}`);
+    const login = serving?.launcher === 'apphost' ? launcher.dashboardLogin(serving.workspace) : null;
+    if (login) say(`Dashboard: ${login}`);
   },
 };
 
@@ -215,10 +309,81 @@ async function finishStart(ws) {
   writeServing(serving);
   const p = appPorts();
   const apiOwner = owners[p.api];
-  const from = apiOwner ? norm(processInfo(apiOwner)) : '';
+  let from = apiOwner ? norm(processInfo(apiOwner)) : '';
+  // With the AppHost, Aspire's DCP holds the port and passes requests on: the api itself is the Platform API host.
+  if (/\/dcp\.exe/.test(from)) from = hostsIn(ws).map((h) => norm(h.program)).find((h) => /orbitax\.platform\.api(\.exe|\.dll)/.test(h)) || '';
   const elsewhere = from && !from.includes(norm(ws));
   say(`The app is up: http://localhost:${p.web}${p.api ? ` (api http://localhost:${p.api})` : ''}, serving ${ws}.`);
   if (elsewhere) say(`Warning: the api process does not come from this workspace: ${from}`);
+  if (serving.launcher === 'apphost') {
+    const login = launcher.dashboardLogin(ws);
+    say(login ? `Aspire dashboard (each service's console, traces): ${login}` : 'Aspire dashboard: http://localhost:15200 (its login line comes in .run-logs/aspire-dashboard.log; app status shows it)');
+  }
+  say(logNote(ws, serving));
+}
+
+// Which services to start: --services replaces the usual set, --with adds to it. A start with neither keeps the
+// services of the app this run started before (a start again after a fix).
+function pickServices(how, ws, serving) {
+  const again = serving?.runId === actorId() && serving.launcher === how && serving.services?.length;
+  let services = option('services') ? list(option('services')) : again ? serving.services : launcher.defaultServices(how, ws);
+  if (flag('workers') && !option('services')) services = [...new Set([...services, 'primary', 'secondary', 'spreadsheet'])];
+  services = [...new Set([...services, ...list(option('with'))])];
+  const cannot = launcher.unsupported(how, services);
+  if (cannot.length && !process.env.ORCHESTRA_APP_START) {
+    say(`Note: run-stack.ps1 cannot start ${cannot.join(', ')}. For those: orch settings launcher=apphost`);
+    services = services.filter((s) => !cannot.includes(s));
+  }
+  const idp = how === 'apphost' && services.includes('idp') ? launcher.idpProblem(ws) : null;
+  if (idp) {
+    say(`Note: the dev IdP (web login, :10203) cannot start: ${idp}. Starting without it; tell the user.`);
+    services = services.filter((s) => s !== 'idp');
+  }
+  return services;
+}
+
+// Starts the app from ws with the launcher, records it as serving, and waits until it answers.
+async function launch(actor, ws, how, services) {
+  let cmd;
+  // Your own checkout: the AppHost's appsettings.local.json there is yours. Keep your copy once before Orchestra
+  // writes its service list into it.
+  const local = path.join(launcher.apphostDir(ws), 'appsettings.local.json');
+  if (actor.id === YOU && how === 'apphost' && fs.existsSync(local) && !fs.existsSync(`${local}.bak-orchestra`)) {
+    fs.copyFileSync(local, `${local}.bak-orchestra`);
+    say(`Kept your AppHost settings as ${local}.bak-orchestra (Orchestra writes the service list into ${path.basename(local)}).`);
+  }
+  try {
+    const brokersRunning = how === 'apphost' && !process.env.ORCHESTRA_APP_START && brokersListening();
+    cmd = launcher.startCommand(how, ws, services, { brokersRunning, itpRoot: config.itpRoot });
+  } catch (err) {
+    fail(err.message);
+  }
+  fs.mkdirSync(launcher.logsDir(ws), { recursive: true });
+  // The service logs of the app before are not this start's: the copier writes them fresh.
+  if (how === 'apphost') for (const [name, file] of Object.entries(launcher.serviceLogs(ws))) if (!/^orchestra-/.test(name)) fs.rmSync(file, { force: true });
+  const out = fs.openSync(path.join(launcher.logsDir(ws), 'orchestra-start.log'), 'w');
+  const child = spawn(cmd.exe, cmd.args, { cwd: cmd.cwd, env: { ...process.env, ...cmd.env }, detached: true, stdio: ['ignore', out, out], windowsHide: true });
+  child.unref();
+  const pids = [child.pid];
+  // Aspire writes no per-service log files: the copier makes .run-logs/<service>.log from its DCP (bin/app-logs.mjs).
+  if (how === 'apphost' && (!process.env.ORCHESTRA_APP_START || process.env.ORCHESTRA_DCP_SESSION)) {
+    const copier = spawn(process.execPath, [path.join(config.root, 'bin', 'app-logs.mjs'), ws, String(child.pid)], { detached: true, stdio: 'ignore', windowsHide: true });
+    copier.unref();
+    pids.push(copier.pid);
+  }
+  writeServing({ runId: actor.id, title: actor.title, workspace: ws, branches: actor.branches, launcher: how, services, pids, startedAt: new Date().toISOString() });
+  say(`Starting the app from ${ws} with ${how === 'apphost' ? 'the Aspire AppHost' : 'run-stack.ps1'}:`);
+  for (const s of services) say(`  ${launcher.serviceLabel(s)}`);
+  say('A cold start can take many minutes (the .NET services compile).');
+  await finishStart(ws);
+}
+
+// Where to watch the logs: .run-logs/<service>.log (run-stack writes them; with the AppHost, the copier does).
+function logNote(ws, serving) {
+  const files = Object.keys(launcher.serviceLogs(ws)).filter((n) => !/^(orchestra-|manual-|aspire-)/.test(n));
+  if (files.length) return `Live logs: ${files.map((n) => `.run-logs/${n}.log`).join(', ')}`;
+  if (serving?.launcher === 'apphost') return "Live logs: none yet. Orchestra copies each service's console from Aspire into .run-logs/ while the app runs; if they stay missing, the copier found no Aspire files: tell the user, and read the Aspire dashboard meanwhile.";
+  return 'Live logs: none yet in .run-logs/.';
 }
 
 function ordinal(n) {
@@ -227,9 +392,11 @@ function ordinal(n) {
 
 function appText(app, serving, h) {
   const lines = [];
-  lines.push(app.holder ? `Has the app: ${app.holder.title}${app.holder.waitingForYou ? ' (waiting for you)' : ''}` : 'Has the app: nobody');
+  lines.push(app.holder?.you ? 'Has the app: you (your own checkout; orch app stop frees it)' : app.holder ? `Has the app: ${app.holder.title}${app.holder.waitingForYou ? ' (waiting for you)' : ''}` : 'Has the app: nobody');
   lines.push(`In line: ${app.line.length ? app.line.map((x) => x.title).join(', ') : 'nobody'}`);
-  lines.push(serving ? `Serving: ${serving.title}'s code from ${serving.workspace}${serving.branches ? ` (${serving.branches})` : ''}, started ${serving.startedAt.slice(11, 16)}` : 'Serving: not started by Orchestra');
+  const whose = serving?.runId === YOU ? 'your checkout' : `${serving?.title}'s code`;
+  const at = serving ? new Date(serving.startedAt).toTimeString().slice(0, 5) : ''; // this PC's time, not UTC
+  lines.push(serving ? `Serving: ${whose} from ${serving.workspace}${serving.branches ? ` (${serving.branches})` : ''}, started ${at}` : 'Serving: not started by Orchestra');
   if (h) lines.push(`Answers: api ${h.api ? 'yes' : 'no'} · web ${h.web ? 'yes' : 'no'}`);
   return lines.join('\n');
 }

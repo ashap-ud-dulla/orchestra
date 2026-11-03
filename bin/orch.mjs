@@ -3,7 +3,9 @@
 // Every command takes the Orchestra lock for a moment and lets go (see lib/lock.mjs).
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { withRunner, gb } from '../lib/runner.mjs';
+import { setup } from '../lib/setup.mjs';
 import { listTemplates, getTemplate, saveTemplate, deleteTemplate, validateTemplate, isSafeId, runDir, WRAP_UP_SKILL } from '../lib/store.mjs';
 import { scanSkills } from '../lib/skills-scan.mjs';
 import { setMark, offProblems, OFF_HELP } from '../lib/tracking.mjs';
@@ -14,6 +16,8 @@ import { tabTitle, ticketKey } from '../lib/terminal.mjs';
 import { config } from '../lib/config.mjs';
 
 const HELP = `Orchestra commands (node bin/orch.mjs <command>):
+  setup --itp <folder> [--email …]        first time on a PC (and after a pull): the ITP folder, starter
+                                          templates, Orchestra's skills into ~/.claude/skills, missing tools
   status                                  what is working and what needs you
   runs [--all]                            the board: every run, needs-you first
   run <run>                               one run: its steps, notes, activity, PR links
@@ -29,6 +33,9 @@ const HELP = `Orchestra commands (node bin/orch.mjs <command>):
   boxes <run> --set '<json list>'         change the steps of a run that has not finished
   timeline <run> [--limit N]              the run's log and activity
   app [release <run>]                     who has the app, who waits for it, whose code it serves
+  app start [--services a,b] [--with a,b] [--force]   the app for you, from your own ITP checkout (refused
+                                          while a run has it); you hold it until: app stop
+  app stop | restart | wait | logs [service] | release   your app (logs: <checkout>/.run-logs/<service>.log)
   about <run> ["text"]                  what the ticket is about (the run says it by itself; set it by hand here)
   watch <run> [--once]                  the run's steps and pins, redrawn live (the pane on the right of its tab)
   pin <run> ["text"] [--title "…"]       pin text to the run's pane (no text: show its pins in full)
@@ -56,7 +63,8 @@ const HELP = `Orchestra commands (node bin/orch.mjs <command>):
                                           accept a workflow change with --apply to change its template now
   rules [--set "…" | --add "…"]           your rules (every run follows them)
   stats                                   spend, templates, skills, recent runs
-  settings [max=N] [learn=on|off] [pane=on|off] [panesize=15..70]   panesize: the pane's width, % of the tab
+  settings [max=N] [learn=on|off] [pane=on|off] [panesize=15..70] [launcher=apphost|runstack]
+                                          panesize: the pane's width, % of the tab · launcher: how the app starts
 A <run> is a Jira key (ITP2-14852), words from its name ("sweden row"), or the end of its id.`;
 
 // ---------- parsing ----------
@@ -75,7 +83,7 @@ function parse(argv) {
   }
   return { pos, opt };
 }
-const VALUE_OPTS = new Set(['rows', 'cols', 'pin', 'scroll', 'title', 'text', 'repos', 'base', 'set', 'add', 'name', 'tracking', 'at', 'label', 'args', 'json-in', 'limit', 'change', 'template', 'model', 'effort']);
+const VALUE_OPTS = new Set(['itp', 'email', 'rows', 'cols', 'pin', 'scroll', 'title', 'text', 'repos', 'base', 'set', 'add', 'name', 'tracking', 'at', 'label', 'args', 'json-in', 'limit', 'change', 'template', 'model', 'effort']);
 
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
@@ -198,7 +206,9 @@ function statusLine(runs, settings, app, clean) {
 
 // App: ITP2-14877 has it · next: ITP2-14929, ITP2-14878
 function appLine(app) {
-  const has = app.holder ? `${app.holder.title} has it${app.holder.waitingForYou ? ' (waiting for you: type next there to hand it on)' : ''}` : 'free';
+  const has = app.holder?.you
+    ? 'you have it (your own checkout; orch app stop frees it)'
+    : app.holder ? `${app.holder.title} has it${app.holder.waitingForYou ? ' (waiting for you: type next there to hand it on)' : ''}` : 'free';
   return `App: ${has}${app.line.length ? ` · next: ${app.line.map((x) => x.title).join(', ')}` : ''}`;
 }
 
@@ -556,13 +566,14 @@ const commands = {
       const out = await r.appRelease(run.id);
       return { json: out, text: `${tabTitle(run)} let go of the app.\n${appLine(out)}` };
     }
-    if (pos[0]) fail('app [release <run>]');
+    if (pos[0]) fail('app [start|stop|restart|wait|logs|release [<run>]]');
     const app = r.appState();
     const s = serving();
+    const whose = s?.runId === 'you' ? 'your checkout' : `${s?.title}'s code`;
     const text = [
       appLine(app),
-      s ? `Serving: ${s.title}'s code from ${s.workspace}${s.branches ? ` (${s.branches})` : ''}, since ${ago(s.startedAt)}` : 'Serving: not started by Orchestra',
-      'Runs take the app in their "Test in the app" step (node bin/app.mjs). Stop it: node bin/app.mjs stop',
+      s ? `Serving: ${whose} from ${s.workspace}${s.branches ? ` (${s.branches})` : ''}, since ${ago(s.startedAt)}` : 'Serving: not started by Orchestra',
+      'Runs take the app in their "Test in the app" step. You: orch app start (your own checkout) · orch app stop',
     ].join('\n');
     return { json: { ...app, serving: s }, text };
   },
@@ -778,8 +789,9 @@ const commands = {
     if (p.cleanup !== undefined) fail('clean-up happens only when you say so now: clean <run>, clean --done, or clean --stale');
     if (p.pane !== undefined) patch.pane = onOff(p.pane, 'pane');
     if (p.panesize !== undefined) patch.paneSize = Number(String(p.panesize).replace(/%$/, ''));
+    if (p.launcher !== undefined) patch.launcher = String(p.launcher).toLowerCase().replace(/[^a-z]/g, '');
     const s = Object.keys(patch).length ? await r.setSettings(patch) : r.getSettings();
-    return { json: s, text: `Runs working at once: ${s.maxRunning} · lessons after each run: ${s.learn !== false ? 'on' : 'off'} · steps pane in run tabs: ${s.pane !== false ? `on (${s.paneSize || 30}% wide)` : 'off'}` };
+    return { json: s, text: `Runs working at once: ${s.maxRunning} · lessons after each run: ${s.learn !== false ? 'on' : 'off'} · steps pane in run tabs: ${s.pane !== false ? `on (${s.paneSize || 30}% wide)` : 'off'} · the app starts with: ${s.launcher === 'runstack' ? 'run-stack.ps1 (runstack)' : 'the Aspire AppHost (apphost)'}` };
   },
 
   async help() {
@@ -915,7 +927,7 @@ function watchFrame(r, width, rows = 0, view = { pin: 1, scroll: 0 }) {
     if (r.about) out.push(...wrap(r.about).slice(0, about).map((l) => l.slice(2)));
     out.push(paint(2, fit(r.templateName)), fit(`${r.status} · ${money(r.cost)}`), '', ...steps);
     out.push('', 'Now:', ...wrap(why(r)).slice(0, now));
-    if (r.status === 'waiting' || r.status === 'needs-you') out.push('', paint(36, fit('Type next or redo on the left.')));
+    if (r.status === 'waiting' || r.status === 'needs-you') out.push('', paint('1;33', fit('Type next or redo on the left.')));
     return out;
   };
 
@@ -931,10 +943,10 @@ function watchFrame(r, width, rows = 0, view = { pin: 1, scroll: 0 }) {
   const n = Math.min(Math.max(1, view.pin || 1), pins.length);
   const pin = pins[n - 1];
   const body = pinLines(pin.text, w);
-  const need = 2 + Math.min(MIN_PIN_ROWS, body.length);
+  const need = 3 + Math.min(MIN_PIN_ROWS, body.length); // the gap, the title, the text, the hint
   if (rows && top.length + need > rows) top = head(folded(), 2, 3);
   if (rows && top.length + need > rows) top = top.slice(0, Math.max(1, rows - need));
-  const page = rows ? Math.max(1, rows - top.length - 2) : body.length;
+  const page = rows ? Math.max(1, rows - top.length - 3) : body.length;
   const scroll = Math.min(Math.max(0, view.scroll || 0), Math.max(0, body.length - page));
   const label = ` Pinned${pins.length > 1 ? ` ${n}/${pins.length}` : ''} · ${pin.title} `;
   const title = paint(36, fit(`──${label}${'─'.repeat(Math.max(0, w - cols(label) - 2))}`));
@@ -943,14 +955,14 @@ function watchFrame(r, width, rows = 0, view = { pin: 1, scroll: 0 }) {
   const hint = [more && (scroll + page < body.length ? `↓ ${body.length - scroll - page} more` : 'end'), more && '↑↓ scroll', pins.length > 1 && '←→ pins']
     .filter(Boolean)
     .join(' · ');
-  const lines = [...top, title, ...shown];
+  const lines = [...top, '', title, ...shown]; // an empty line keeps the pin apart from the steps and the hint
   if (rows && hint) while (lines.length < rows - 1) lines.push('');
   if (hint) lines.push(paint(2, fit(hint)));
   return { lines: rows ? lines.slice(0, rows) : lines, pin: pin.id, scroll, page };
 }
 
 // Redraws the pane every 2 seconds from the run's file (no lock: it only reads), and at once on a key.
-// Keys (click the pane first): ↑ ↓ PgUp PgDn Home End and the mouse wheel scroll the pin; ← → show older / newer pins.
+// Keys (click the pane first): ↑ ↓ PgUp PgDn Home End and the mouse wheel (sent as ↑ ↓) scroll the pin; ← → show older / newer pins.
 // It writes the pin it shows to pane.json, so `unpin` in the tab removes that one.
 // Ends when the run's tab closes, so the split pane closes with it. --once prints one screen (--rows/--cols/--pin/--scroll).
 async function watch(ref, once, size = {}) {
@@ -1006,14 +1018,17 @@ async function watch(ref, once, size = {}) {
     }
     process.stdout.write('\x1b[H' + f.lines.map((l) => l + '\x1b[K').join('\n') + '\x1b[J');
   };
-  const MOUSE = '\x1b[?1000h\x1b[?1006h';
-  const NO_MOUSE = '\x1b[?1000l\x1b[?1006l';
+  // The wheel: Node's raw mode on Windows drops mouse events, so mouse reporting (?1000h) never reaches us (checked:
+  // only keys arrived). On the alternate screen with "alternate scroll" (?1049h ?1007h), Windows Terminal sends the
+  // wheel as ↑ ↓ keys, which scroll the pin. No mouse reporting also means a plain drag selects text.
+  const WHEEL = '\x1b[?1049h\x1b[?1007h';
+  const NO_WHEEL = '\x1b[?1007l\x1b[?1049l';
   const tty = process.stdin.isTTY && typeof process.stdin.setRawMode === 'function';
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
-    process.stdout.write(`${tty ? NO_MOUSE : ''}\x1b[?7h\x1b[?25h`);
+    process.stdout.write(`${tty ? NO_WHEEL : ''}\x1b[?7h\x1b[?25h`);
     if (tty) process.stdin.setRawMode(false);
     try {
       // No pane: `unpin` takes the newest pin. (Only this pane's note: a second `orch watch` may still run.)
@@ -1025,7 +1040,7 @@ async function watch(ref, once, size = {}) {
   if (tty) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdout.write(MOUSE); // the wheel comes as mouse events (select text with Shift + drag)
+    process.stdout.write(WHEEL); // the wheel comes as ↑ ↓ keys
     const scrollBy = (d) => {
       view.scroll = Math.max(0, view.scroll + d);
       draw();
@@ -1052,13 +1067,7 @@ async function watch(ref, once, size = {}) {
         restore();
         process.exit(0);
       }
-      // Mouse wheel (SGR): ESC [ < 64 ; x ; y M is up, 65 is down. Clicks are left alone.
-      for (const m of s.matchAll(/\x1b\[<(\d+);\d+;\d+[Mm]/g)) {
-        if (m[1] === '64') scrollBy(-3);
-        else if (m[1] === '65') scrollBy(3);
-      }
-      const rest = s.replace(/\x1b\[<\d+;\d+;\d+[Mm]/g, '');
-      for (const k of rest.match(/\x1b\[[\d;]*[~A-Za-z]|\x1bO[A-Z]|[\s\S]/g) || []) KEYS[k]?.();
+      for (const k of s.match(/\x1b\[[\d;]*[~A-Za-z]|\x1bO[A-Z]|[\s\S]/g) || []) KEYS[k]?.();
     });
   }
   process.on('exit', restore);
@@ -1091,7 +1100,24 @@ try {
     await watch(pos[0] || fail('name a run to watch'), !!opt.once, { rows: Number(opt.rows) || 0, cols: Number(opt.cols) || 0, pin: Number(opt.pin) || 1, scroll: Number(opt.scroll) || 0 });
     process.exit(0);
   }
+  if (name === 'setup') {
+    const out = await setup({ itp: typeof opt.itp === 'string' ? opt.itp : pos[0], email: typeof opt.email === 'string' ? opt.email : undefined });
+    process.stdout.write((json ? JSON.stringify(out.json, null, 1) : out.text) + '\n');
+    process.exit(0);
+  }
+  // The app for you, outside any run: bin/app.mjs does the work (it takes the run lock itself, so not inside one).
+  if (name === 'app' && (['start', 'stop', 'restart', 'wait', 'logs'].includes(pos[0]) || (pos[0] === 'release' && !pos[1]))) {
+    const env = { ...process.env };
+    delete env.ORCHESTRA_RUN_ID; // even typed in a run's tab, orch app is you
+    delete env.ORCHESTRA_HOOK_TOKEN;
+    const raw = process.argv.slice(process.argv.indexOf('app') + 1);
+    const r = spawnSync(process.execPath, [path.join(config.root, 'bin', 'app.mjs'), ...raw], { stdio: 'inherit', env });
+    process.exit(r.status ?? 1);
+  }
   if (!cmd) fail(`unknown command: ${name}\n\n${HELP}`);
+  if (!config.itpRoot && name !== 'help') {
+    fail(`Orchestra does not know your ITP folder yet. Run: node ${path.join(config.root, 'bin', 'orch.mjs').replace(/\\/g, '/')} setup --itp <your ITP folder>`);
+  }
   const out = await withRunner((r) => cmd(r, { pos, opt }));
   process.stdout.write((json ? JSON.stringify(out.json, null, 1) : out.text) + '\n');
   process.exit(0);
