@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet test *)",
+      "Bash(grep -vE \"NU1903|warning|\\\\.dll$\")",
+      "Bash(grep -A 12 \"HostileAddressesSurviveARealLiquidRender\\(\\\\\"\\\\\\\\\\\\\\\\ud800\\\\\"\\)\")",
+      "Artifact",
+      "Read(//c/Users/ASHAP~1.BAP/AppData/Local/Temp/claude/C--Workstation-Workspace-ITP/3fa5707b-b525-40e0-b65c-612f783fa6b6/scratchpad/**)",
+      "Bash(python3 -)",
+      "Bash(cd *)",
+      "Bash(grep -vE \"NU1903|warning CS|\\\\.dll$|-> C:\\\\\\\\\\\\\\\\\")",
+      "Bash(curl -s --max-time 25 \"https://teamspace.orbitax.com/api/bootstrap\" -o /tmp/bs.json -w \"http=%{http_code} bytes=%{size_download}\\\\n\")",
+      "Bash(python -c ' *)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "FM-MCP",
+    "aspire",
+    "aspire-dashboard",
+    "mongodb",
+    "mongodb-app",
+    "mongodb-global",
+    "mongodb-cluster",
+    "bitbucket",
+    "jira"
+  ]
+}

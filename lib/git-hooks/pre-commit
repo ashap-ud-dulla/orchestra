@@ -1,5 +1,10 @@
 #!/bin/sh
 # Orchestra: no commits, merges or rebases on the main branch (the vault excepted: the team commits it on main).
+# In the ITP folder itself, only Execution/ files may be committed (by the Wrap up step).
 . "$(dirname "$0")/_orchestra.sh"
 orchestra_no_main
+if orchestra_is_itp; then
+  other=$(git diff --cached --name-only | grep -v '^Execution/' | head -5)
+  [ -z "$other" ] || orchestra_refuse "in the ITP folder only Execution/ files may be committed, not: $(echo $other)"
+fi
 orchestra_chain pre-commit "$@"

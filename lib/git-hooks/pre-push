@@ -1,18 +1,17 @@
 #!/bin/sh
-# Orchestra: a push needs your Approve, and a push to main is always refused.
+# Orchestra: a push to main is always refused. Other pushes need ORCHESTRA_ALLOW_PUSH=1; a run's
+# terminal session sets it, because there Claude asks you before every push (the PreToolUse guard).
 . "$(dirname "$0")/_orchestra.sh"
 input=$(cat)
 if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exit !found }'; then
-  orchestra_refuse "a push to the main branch is refused, even with Approve."
+  # One exception: the Wrap up step pushes the vault and the ITP folder, which live on main.
+  if orchestra_wrap_up && { orchestra_main_ok || orchestra_is_itp; }; then
+    :
+  else
+    orchestra_refuse "a push to the main branch is refused, even with Approve."
+  fi
 fi
 if [ "$ORCHESTRA_ALLOW_PUSH" != "1" ]; then
-  if [ -n "$ORCHESTRA_RUN_DIR" ]; then
-    # Quotes and backslashes would break the JSON line, so drop them.
-    refs=$(printf '%s\n' "$input" | awk '{ print $3 }' | tr '\n' ' ' | tr -d '"\\')
-    remote=$(printf '%s' "$1" | tr -d '"\\')
-    printf '{"at":"%s","source":"git","command":"git push %s %s"}\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$remote" "$refs" >> "$ORCHESTRA_RUN_DIR/approval-requests.jsonl"
-  fi
-  orchestra_refuse "this push needs the user's Approve. Stop, say what you want to push and why, and end your reply with the line ORCHESTRA:APPROVAL."
+  orchestra_refuse "this push needs the user's Approve."
 fi
 printf '%s\n' "$input" | orchestra_chain pre-push "$@"

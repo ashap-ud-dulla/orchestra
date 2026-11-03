@@ -1,0 +1,117 @@
+{
+  "id": "bug-template",
+  "name": "Bug",
+  "tracking": true,
+  "repos": [
+    "api",
+    "webclient"
+  ],
+  "boxes": [
+    {
+      "id": "find-it-in-the-logs",
+      "skill": "orchestra-bug-logs",
+      "label": "Find it in the logs",
+      "args": "",
+      "waitAfter": true,
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "plan",
+      "skill": "plan-itp",
+      "label": "Plan the fix",
+      "args": "This is a bug. Use the log trace in .orchestra-bug/trace.md. Reproduce and find the root cause first. Show the full plan in the chat.",
+      "waitAfter": true,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "epic",
+      "skill": "plan-to-epic",
+      "label": "Make the epic",
+      "args": "--fresh for the Plan you just wrote",
+      "waitAfter": false,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "preflight",
+      "skill": "epic-preflight",
+      "label": "Preflight",
+      "args": "the epic you just made",
+      "waitAfter": false,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "build",
+      "skill": "execute-epics",
+      "label": "Build",
+      "args": "the epic you just made and preflighted. The fix comes with a test that fails before the fix and passes after.",
+      "waitAfter": false,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "sonnet",
+      "effort": "high",
+      "fresh": true
+    },
+    {
+      "id": "test-in-the-app",
+      "skill": "orchestra-app-test",
+      "label": "Test in the app",
+      "args": "",
+      "waitAfter": true,
+      "model": "sonnet",
+      "effort": "high"
+    },
+    {
+      "id": "ai-itp-code-reviewer",
+      "skill": "ai-itp-code-reviewer",
+      "label": "ai-itp-code-reviewer",
+      "args": "",
+      "waitAfter": true,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "opus",
+      "effort": "high",
+      "fresh": true
+    },
+    {
+      "id": "review",
+      "skill": "review-changes",
+      "label": "Review Changes",
+      "args": "the epic you just built",
+      "waitAfter": true,
+      "usesApp": false,
+      "walkthrough": true,
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "ship",
+      "skill": "finalize-epic",
+      "label": "Push + PR link",
+      "args": "the epic you just built and reviewed",
+      "waitAfter": true,
+      "usesApp": false,
+      "walkthrough": false,
+      "model": "sonnet",
+      "effort": "medium"
+    },
+    {
+      "id": "wrap-up",
+      "skill": "orchestra-wrap-up",
+      "label": "Wrap up",
+      "args": "",
+      "model": "sonnet",
+      "effort": "medium",
+      "fresh": true
+    }
+  ]
+}

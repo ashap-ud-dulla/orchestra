@@ -34,13 +34,31 @@ orchestra_chain() {
 # The current repo is one where local work on main is allowed: the vault (ITPKV), which the
 # team commits to on main by design. ORCHESTRA_MAIN_OK lists those folders, one per line.
 orchestra_main_ok() {
-  [ -n "$ORCHESTRA_MAIN_OK" ] || return 1
+  orchestra_repo_in "$ORCHESTRA_MAIN_OK"
+}
+
+# The Wrap up step works in the run's open tab now (Orchestra keeps this flag in the run's folder).
+orchestra_wrap_up() {
+  [ -n "$ORCHESTRA_RUN_DIR" ] && [ -f "$ORCHESTRA_RUN_DIR/wrap-up.ok" ]
+}
+
+# The current repo is the ITP folder itself (the itp-workspace repo, on main).
+# Tabs opened before ORCHESTRA_ITP_ROOT existed read it from the Wrap up flag.
+orchestra_is_itp() {
+  root=$ORCHESTRA_ITP_ROOT
+  [ -n "$root" ] || root=$(cat "$ORCHESTRA_RUN_DIR/wrap-up.ok" 2>/dev/null)
+  orchestra_repo_in "$root"
+}
+
+# The current repo's top folder is one of $1 (folders, one per line).
+orchestra_repo_in() {
+  [ -n "$1" ] || return 1
   top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
   top_p=$(cd "$top" 2>/dev/null && pwd -P)
   old_ifs=$IFS
   IFS='
 '
-  for d in $ORCHESTRA_MAIN_OK; do
+  for d in $1; do
     d_p=$(cd "$d" 2>/dev/null && pwd -P)
     for a in "$top" "$top_p"; do
       for b in "$d" "$d_p"; do
@@ -58,9 +76,10 @@ orchestra_norm() {
   printf '%s' "$1" | tr '\\' '/' | sed -e 's#^/\([a-zA-Z]\)/#\1:/#' -e 's#/*$##' | tr 'A-Z' 'a-z'
 }
 
-# Refuses work on main, except in the vault.
+# Refuses work on main, except in the vault, and in the ITP folder while the Wrap up step works.
 orchestra_no_main() {
   [ "$(orchestra_branch)" = "main" ] || return 0
   orchestra_main_ok && return 0
+  orchestra_wrap_up && orchestra_is_itp && return 0
   orchestra_refuse "work on the main branch is refused. Use the run's work branch."
 }
