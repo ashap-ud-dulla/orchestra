@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseFrontmatter } from '../lib/skills-scan.mjs';
 import { childEnv, guardEnv, lastReply } from '../lib/runner.mjs';
 import { check, readMark, readWhy } from '../lib/guard.mjs';
@@ -500,6 +500,104 @@ test('models: next or redo onto a step with another model restarts too; the same
   await close(run);
 });
 
+test('models: "/orchestra model" in the tab switches the step working now, on the same conversation, with no redo', async () => {
+  const run = await startRun([
+    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', model: 'sonnet', effort: 'high', waitAfter: true },
+    { id: 'recap', skill: 'orchestra-recap', label: 'Recap', model: 'sonnet' },
+  ]);
+  await launch(run, fakeLauncher());
+  const say = async (prompt) => (await hook(run, 'UserPromptSubmit', { prompt })).body.output;
+  // Plain talk stays talk; a line for the /orchestra skill (a ticket key in it) reaches the skill.
+  assert.equal((await say('model opus'))?.decision, undefined);
+  assert.equal((await say('/orchestra model ITP2-1 opus'))?.decision, undefined);
+  assert.equal((await say('/orchestra effort'))?.decision, 'block', '"effort" alone shows');
+  assert.match((await say('/orchestra model')).reason, /"Say hello" already runs with sonnet, effort high/);
+  // Switch the working step: block (the old claude stops), same conversation, a "go on" prompt, not the step again.
+  const o = await say('/orchestra model opus effort ultracode');
+  assert.equal(o.decision, 'block');
+  assert.match(o.reason, /restarts this tab with opus, ultracode for "Say hello"[\s\S]*costs a lot/);
+  let now = await getRun(run.id);
+  assert.deepEqual([now.boxes[0].model, now.boxes[0].effort, now.boxes[0].status], ['opus', 'ultracode', 'running']);
+  assert.equal(now.restart.fresh, false);
+  assert.ok(fs.existsSync(path.join(runsDir, run.id, 'restart.ok')));
+  assert.ok(!now.chat.some((m) => /^\/orchestra model opus effort/.test(m.text)), 'a tab command, not talk');
+  const { body: again } = await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  const a = again.args;
+  assert.equal(a[a.indexOf('--resume') + 1], run.sessionId, 'the same conversation');
+  assert.equal(a[a.indexOf('--model') + 1], 'opus');
+  assert.equal(a[a.indexOf('--effort') + 1], 'ultracode');
+  assert.equal(again.env.CLAUDE_CODE_DISABLE_WORKFLOWS, undefined, 'ultracode may use workflows');
+  assert.match(a.at(-1), /go on with the step "Say hello" from where you were\. Do not start the step again/);
+  assert.doesNotMatch(a.at(-1), /run the skill/);
+  // The same again: nothing to restart.
+  assert.match((await say('/orchestra effort ultracode')).reason, /already runs with opus, ultracode/);
+  assert.equal((await getRun(run.id)).restart, null);
+  // orch model changes the run only; the step working now switches when "/orchestra model" is typed in the tab.
+  const cli = await orchText('model', run.id, 'sonnet', 'high');
+  assert.equal(cli.code, 0);
+  assert.match(cli.out, /"Say hello" \(working now\) runs with sonnet, effort high\.\nType "\/orchestra model" in its tab to switch now/);
+  assert.equal((await getRun(run.id)).restart, null, 'never a restart from outside');
+  assert.match((await orchText('model', run.id, 'gpt 4!')).err, /model must be/);
+  assert.match((await say('/orchestra model')).reason, /restarts this tab with sonnet, effort high/);
+  await runnerCall('relaunchSpec', [run.id, run.hookToken, (await getRun(run.id)).session.pid]);
+  // Waiting after the step: the next step changes, with no restart; it starts with it on next.
+  await hook(run, 'Stop', done('hello'));
+  assert.equal((await getRun(run.id)).status, 'waiting');
+  assert.match((await say('/orchestra model haiku')).reason, /"Recap" \(the next step\) will run with haiku\. It starts with it when you type next/);
+  assert.equal((await getRun(run.id)).restart, null);
+  assert.equal((await getRun(run.id)).boxes[1].model, 'haiku');
+  await close(run);
+});
+
+test('back: "/orchestra back <step> why" copies the steps from there, keeps the old ones, and starts the copy', async () => {
+  const run = await startRun([
+    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', waitAfter: true },
+    { id: 'recap', skill: 'orchestra-recap', label: 'Recap', waitAfter: true },
+    { id: 'last', skill: 'orchestra-hello', label: 'Last' },
+  ]);
+  await launch(run, fakeLauncher());
+  const say = async (prompt) => (await hook(run, 'UserPromptSubmit', { prompt })).body.output;
+  await hook(run, 'Stop', done('hello'));
+  await say('next');
+  await hook(run, 'Stop', done('recap'));
+  assert.equal((await getRun(run.id)).status, 'waiting');
+  // A step that has not finished, or a name that fits none: said, nothing changes.
+  assert.match((await say('/orchestra back 3')).reason, /no finished step "3"\. Finished steps: 1\. Say hello · 2\. Recap/);
+  assert.match((await orchText('back', run.id, 'nothing')).err, /no finished step "nothing"/);
+  assert.equal((await getRun(run.id)).boxes.length, 3);
+  // Back to step 1 with a why: copies of 1 and 2 after step 2, the first starts on this conversation.
+  const o = await say('/orchestra back say hello the greeting is wrong');
+  assert.equal(o.decision, 'block');
+  assert.match(o.reason, /Added after "Recap": Say hello \(2\) > Recap \(2\)\. "Say hello \(2\)" starts on this conversation/);
+  let now = await getRun(run.id);
+  assert.deepEqual(now.boxes.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'hello-2:running', 'recap-2:pending', 'last:pending']);
+  assert.equal(now.boxes[3].waitAfter, true, 'a copy keeps its settings');
+  assert.equal(now.restart.fresh, false);
+  assert.ok(!now.chat.some((m) => /^\/orchestra back/.test(m.text)), 'a tab command, not talk');
+  const { body: spec } = await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  const p = spec.args.at(-1);
+  assert.equal(spec.args[spec.args.indexOf('--resume') + 1], run.sessionId);
+  assert.match(p, /box "Say hello \(2\)": run the skill \/orchestra-hello/);
+  assert.match(p, /went back to this step[\s\S]*Why the user went back: the greeting is wrong[\s\S]*- Recap \(\/orchestra-recap\)/);
+  // While a copy works, the CLI refuses; in the tab, going back again puts the working step back in line.
+  assert.match((await orchText('back', run.id, 'recap')).err, /working now/);
+  assert.match((await say('/orchestra from recap: wrong words')).reason, /Recap \(3\)\. "Say hello \(2\)" runs again after them/);
+  now = await getRun(run.id);
+  assert.deepEqual(now.boxes.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'recap-3:running', 'hello-2:pending', 'recap-2:pending', 'last:pending']);
+  assert.equal(now.boxes[2].why, 'wrong words');
+  await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  // The CLI on a waiting run: adds the copies, starts nothing; next starts them.
+  await hook(run, 'Stop', done('recap-3'));
+  assert.equal((await getRun(run.id)).status, 'waiting');
+  const cli = await orchText('back', run.id, '1');
+  assert.equal(cli.code, 0, cli.err);
+  assert.match(cli.out, /went back\. New steps: Say hello \(3\) > Recap \(4\) > Recap \(5\)\.[\s\S]*asks you why[\s\S]*Type next in its tab/);
+  now = await getRun(run.id);
+  assert.equal(now.boxes.find((b) => b.id === 'hello-3').status, 'pending');
+  assert.equal(now.restart, null);
+  await close(run);
+});
+
 test('models: the launcher stops claude and starts it again in the same tab with the next step\'s model', async () => {
   const run = await startRun([
     { id: 'hello', skill: 'orchestra-hello', label: 'Say hello' },
@@ -524,7 +622,7 @@ test('models: the launcher stops claude and starts it again in the same tab with
     assert.match(second.args.at(-1), /\/orchestra-recap/);
     assert.equal(tab.exitCode, null, 'the same launcher, so the same tab');
     await waitFor(() => { try { process.kill(first.pid, 0); return false; } catch { return true; } }, 'the first claude to be stopped');
-    assert.match(out, /runs with sonnet\. Restarting claude on the same conversation/);
+    assert.match(out, /now with sonnet\. Restarting claude on the same conversation/);
     const now = await getRun(run.id);
     assert.equal(now.session.open, true);
     assert.equal(now.status, 'running');
@@ -802,6 +900,25 @@ test('app: runs wait in line for the app; it is held until next; a closed tab ha
   }
 });
 
+test('app: a run waiting for you after a step may take the app (preqa); next lets go of it', async () => {
+  const a = await startRun([{ id: 'review', skill: 'orchestra-hello', label: 'Review', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+  const b = await startRun();
+  try {
+    await hook(a, 'Stop', done('reviewed'));
+    assert.equal((await getRun(a.id)).status, 'waiting');
+    // You talk to Claude between steps (the status moves on, the run still waits after the step).
+    await hook(a, 'UserPromptSubmit', { prompt: 'QA is here: start the app for preqa' });
+    await hook(a, 'Notification', { message: 'Claude needs your permission' });
+    assert.match((await app(a, 'take', '--minutes', '0')).out, /You have the app/, 'between steps, for QA');
+    await hook(a, 'Stop', { last_assistant_message: 'The app is up for QA.' });
+    assert.equal((await app(b, 'take', '--minutes', '0')).code, 3, 'held while A still waits for you');
+    await hook(a, 'UserPromptSubmit', { prompt: 'next' });
+    assert.match((await app(b, 'take', '--minutes', '0')).out, /You have the app/, 'next ended the waiting hold');
+  } finally {
+    for (const r of [a, b]) await close(r);
+  }
+});
+
 test('app: start stops the app of the run before, starts this run\'s, and leaves an app it did not start alone', async () => {
   const a = await startRun();
   const b = await startRun();
@@ -867,8 +984,19 @@ test('launcher: the AppHost gets the run\'s resource list, keeps your own settin
     assert.deepEqual(services, ['webclient', 'api', 'primary', 'secondary', 'spreadsheet', 'scheduler', 'mcp', 'idp', 'mission']);
     process.env.ITP_MissionApis = ',';
     assert.ok(!L.defaultServices('apphost', ws).includes('mission'), 'MissionApis="," keeps XatBot on Primary');
+    assert.equal(L.missionOff(ws, ['api']), false, 'Debug.json already keeps XatBot on Primary: nothing to add');
+
+    // Mission left off while MissionApis sends XatBot to it: each host this start runs gets ITP_MissionApis=",".
+    process.env.ITP_MissionApis = '';
+    const noMission = services.filter((s) => s !== 'mission');
+    const offCmd = L.startCommand('apphost', ws, noMission, { brokersRunning: true });
+    assert.equal(offCmd.env.ITP_MissionApis, ',', 'the AppHost gets it too');
+    const offRes = JSON.parse(fs.readFileSync(path.join(host, 'appsettings.local.json'), 'utf8')).AppHost.Resources;
+    assert.deepEqual(offRes.platform.env, { A__B: '1', ITP_MissionApis: ',' }, 'added beside your own env');
+    assert.deepEqual([offRes.primary.env?.ITP_MissionApis, !!offRes.mission?.enabled, offRes['website-api'].env, offRes.redis.env], [',', false, undefined, undefined]);
 
     const cmd = L.startCommand('apphost', ws, services, { brokersRunning: true });
+    assert.equal(cmd.env.ITP_MissionApis, undefined, 'Mission on: no override');
     assert.deepEqual([cmd.exe, ...cmd.args], ['dotnet', 'run', '--project', 'Applications/Orbitax.AppHost', '--launch-profile', 'http']);
     assert.equal(path.resolve(cmd.cwd).toLowerCase(), path.resolve(ws, 'ITP-API/Orbitax.Platform.Api').toLowerCase());
     assert.equal(cmd.env.ASPIRE_ALLOW_UNSECURED_TRANSPORT, 'true');
@@ -877,11 +1005,25 @@ test('launcher: the AppHost gets the run\'s resource list, keeps your own settin
     for (const on of ['webclient', 'platform', 'primary', 'secondary', 'spreadsheetjob', 'scheduler', 'mcp-consumer', 'teamspace-agent', 'mission']) assert.equal(res[on].enabled, true, on);
     for (const off of ['redis', 'rabbitmq', 'website-api']) assert.equal(res[off].enabled, false, off);
     assert.equal(res.webclient.scriptName, 'mine', 'your webclient script is kept');
-    assert.deepEqual(res.platform.env, { A__B: '1' }, 'your env is kept');
+    assert.deepEqual(res.platform.env, { A__B: '1' }, 'your env is kept, the earlier start\'s "," is gone');
+    assert.equal(res.primary.env, undefined, 'an env map Orchestra made is gone again');
     assert.equal(written.AppHost.Url, 'http://x//y', '// inside a string is not a comment');
     L.startCommand('apphost', ws, ['api'], { brokersRunning: false });
     const again = JSON.parse(fs.readFileSync(path.join(host, 'appsettings.local.json'), 'utf8')).AppHost.Resources;
     assert.deepEqual([again.redis.enabled, again.rabbitmq.enabled, again.webclient.enabled], [true, true, false], 'brokers on when nothing serves them');
+
+    // The backup lives in Orchestra's data folder, never in the ITP repo; an old one in the repo moves out.
+    const inRepo = path.join(host, 'appsettings.local.json.bak-orchestra');
+    fs.writeFileSync(inRepo, '{"old":1}');
+    // In a child with the tests' data folder (an import here would see this PC's data folder).
+    const keep = `import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'lib/launcher.mjs')).href)}).then((L) => console.log(L.keepSettingsBackup(${JSON.stringify(ws)})))`;
+    const kept = await proc(['--input-type=module', '-e', keep]);
+    const backup = kept.out.trim();
+    assert.ok(!fs.existsSync(inRepo), 'nothing left in the repo');
+    assert.ok(path.resolve(backup).toLowerCase().startsWith(path.resolve(dataDir).toLowerCase()), backup + kept.err);
+    assert.equal(fs.readFileSync(backup, 'utf8'), '{"old":1}', 'the older backup wins');
+    await proc(['--input-type=module', '-e', keep]);
+    assert.equal(fs.readFileSync(backup, 'utf8'), '{"old":1}', 'never overwritten');
 
     assert.equal(L.serviceName('Platform'), 'api');
     assert.equal(L.serviceName('spreadsheetjob'), 'spreadsheet');

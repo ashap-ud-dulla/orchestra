@@ -30,7 +30,13 @@ Below, `orch <command>` means that full line. `orch help` lists every command.
   folder (the one with `.claude/skills`, `ITP-API`, `ITP-WebClient`), then run `orch setup --itp <folder>` and show
   what it prints (missing tools included). After a `git pull` of Orchestra, `orch setup` again refreshes the skills.
 - Each run opens its own tab in the **"orchestra"** Windows Terminal window (Alt+Tab). The user talks to the run there:
-  `next` after a "wait for me" step, `redo` to run a step again. The tab is split: the pane on the right shows the
+  `next` after a "wait for me" step, `redo` to run a step again, `/orchestra model opus effort high` (or
+  `/orchestra effort max`, `/orchestra model` to show) to switch the model of the step it is on: Orchestra catches it
+  before this skill loads, and claude restarts in the same tab, on the same conversation, going on where it was (no redo).
+  **Go back** to a finished step (a code review found problems, say): `/orchestra back build fix the review findings`
+  (also `/orchestra from 5 …`; the step by number or name, then why). Copies of that step and the steps after it go
+  in as new steps ("Build (2)", …), the old ones stay as history, and the first copy starts at once, told why and
+  what the later steps found. The tab is split: the pane on the right shows the
   run's steps live (done / working now / to come). To see them in another terminal: `orch watch <ticket>` (Ctrl+C ends it).
 - **Pins**: below the steps, the pane keeps instructions the user follows by hand (test steps, values to pick), so
   they stay in sight while the user chats. The run's Claude pins steps by itself (an `ORCHESTRA:PIN` block). In the
@@ -66,6 +72,8 @@ Match what the user typed and skip the menu:
 | `skills <words>` | `orch skills <words>` |
 | `learn`, `lessons` | **Lessons** |
 | `stats` | `orch stats` |
+| `back <ticket> <step> …`, "go back to build", "start again from step 5" | `orch back <ticket> <step> [why]`, then tell them to type `next` in its tab (or, quicker, `/orchestra back <step> why` in the tab itself: it starts at once). No ticket: ask which run. |
+| `model <ticket> …`, "use opus for this step" | `orch model <ticket> <model> [effort]` (see **Templates & skills**). No ticket: ask which run (`orch runs`). |
 | `app`, "start / stop / restart the app", "app logs" | **The app for you** |
 | `settings …` | `orch settings …` |
 | anything else | read it as a plain request and pick the closest section |
@@ -160,6 +168,10 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
   A step with none keeps the one before. When the next step wants another model or effort, Orchestra restarts the
   run's claude in the same tab, on the same conversation (a few seconds; changing the model re-reads the chat once at
   full price). Usual split: opus for thinking steps (grill, plan, epic, review), sonnet for code (build, app test).
+  **The step a run is on, now** ("use opus for this step"): `orch model <ticket> <model> [effort]` changes only that
+  run. A step working now switches when the user types `/orchestra model` in the run's tab (Orchestra never restarts
+  it from outside: that could cut claude off mid-work); tell them so. Typing `/orchestra model opus effort ultracode`
+  there does both at once.
   **Ultracode** = many helper agents for one step: deep but costly (one small job used ~400k tokens). Turn it on only
   for the step the user names, and say the cost in one line.
 - **Bug template** (`bug-template`): step 1 `orchestra-bug-logs` reads the ticket, asks for the environment and time if
@@ -185,16 +197,23 @@ launcher as runs (AppHost by default, per-service logs in `<checkout>/.run-logs/
 - **Ask which database, before every start: Global DB or Local DB.** Read which one is active now (see "The
   database" below) and say it in the question, with the active one first. Ask also whether to add Outsider (usually no).
   If the user picks the other DB, switch it before the start, so the app starts once on the right one.
+- **Ask about the Mission consumer too, in the same AskUserQuestion**, when the checkout has it (the folder
+  `{{ITP}}/ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer` exists; if not, do not ask).
+  Options: **No (usually)**, first · **Yes**: it is needed only to test XatBot / Mission work. No adds
+  `--without mission`: Orchestra then sends XatBot commands to Primary for this start (`ITP_MissionApis=","` in the
+  AppHost settings), so they do not hang; the user's Debug.json is not changed.
 - Then `orch app start` (give the Bash tool a 600000 ms timeout; add `--minutes 9`). It prints the services, then
-  "The app is up …" with the Aspire dashboard line. Show it, and say which DB it runs on.
-  `--with outsider` adds Outsider; `--services webclient,api,…` sets the whole list.
+  "The app is up …" with the Aspire dashboard line. Show it, and say which DB it runs on and whether Mission is on.
+  `--with outsider` adds Outsider; `--without mission` leaves Mission off; `--services webclient,api,…` sets the
+  whole list. `orch app restart` keeps the same services.
 - While the user has it, runs that want the app wait in line. Say so in one line.
 - **A run has the app**: the start is refused and names the run and what it does. Do not take it by yourself: offer
   to wait, or `orch app release <ticket>` (it takes the app from that run, mid-step) only after the user says so.
 - "Not up yet": `orch app wait --minutes 9`. Exit code 5 ("not started by Orchestra"): something else holds the ports
   (the user's own app from Visual Studio, say). Show the processes and ask; `orch app start --force` only after yes.
 - `orch app logs [service]`, `orch app restart` (after a code change or a Debug.json switch), `orch app stop` (frees
-  it for runs). The first start in a checkout keeps the user's own AppHost settings as `appsettings.local.json.bak-orchestra`.
+  it for runs). The first start in a checkout keeps the user's own AppHost settings in Orchestra's
+  `data/apphost-backups/` (never inside the ITP repo; its `appsettings.local.json` is gitignored there).
 - **Switching while the app runs** ("now Local DB"): switch as below, then `orch app restart --minutes 9`, then tell
   the user to reload the page (Ctrl+F5) and check the project picker.
 

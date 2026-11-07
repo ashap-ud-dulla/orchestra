@@ -1,6 +1,6 @@
 ---
 name: orchestra-app-test
-description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), watches the api logs for errors, hands the app to the user with an exact click path, and fixes what the user reports (2 rounds at most). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
+description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), hands the app to the user with an exact click path, and fixes what the user reports (2 rounds at most). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
 ---
 
 # Test in the app
@@ -15,9 +15,9 @@ node {{ORCHESTRA}}/bin/app.mjs <command>
 Commands that wait (`take`, `start`, `wait`) take `--minutes 9`: give the Bash tool a timeout of 600000 ms.
 When one ends with "Still waiting" or "Not up yet", just run it again, but see 3.5 first: that message can be wrong.
 
-**The user tests, you build, start and watch.** The user clicks through the app in their own browser. You do not drive
+**The user tests, you build and start.** The user clicks through the app in their own browser. You do not drive
 a browser, unless the user asks you to. Your jobs: a correct build, an app that is really up with every service the test
-needs, a log watcher that reports api errors, an exact click path, and fixes.
+needs, an exact click path, the logs read when something fails, and fixes.
 
 ## 1. Plan the test (no app needed)
 
@@ -39,6 +39,10 @@ needs, a log watcher that reports api errors, an exact click path, and fixes.
   the Scheduler, the MCP consumer, the dev IdP**, and the **Mission consumer** when the branch has it (unless
   `MissionApis=","` keeps XatBot on Primary). The user usually does **not** need **Outsider**: always ask about it,
   with "no" as the expected answer. Only start it when the user says yes (`--with outsider`).
+- **The Mission consumer**, when the workspace has it (`ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer`
+  exists): ask too. The usual answer is **no**; say **yes** first only when the ticket touches XatBot or Mission.
+  No adds `--without mission`: XatBot commands then go to Primary for this start (`ITP_MissionApis=","`), so they
+  do not hang; the user's Debug.json is not changed.
 - **Which database: Global DB or Local DB.** Read which one is active now (see "Switching the database" below) and say
   it in the question. The user may need one for one check and the other for the next (for example the data of one
   project lives only on the Local DB). Projects, entities and forms differ between the two: tell the user that.
@@ -74,7 +78,7 @@ restart of the .NET services (the web app does not read it).
 3. If the user wants the other database than the active one, switch it **before** you start (see "Switching the
    database"), so the app starts once on the right one.
 4. Start the app with the services from step 2: `app start --minutes 9`, plus `--with outsider` only if the user said
-   yes. `--services webclient,api,…` sets the whole list instead (names: `webclient, api, primary, secondary,
+   yes, and `--without mission` if they said no to Mission. `--services webclient,api,…` sets the whole list instead (names: `webclient, api, primary, secondary,
    spreadsheet, mission, scheduler, mcp, idp, outsider`). Do not set `ORCHESTRA_APP_START` and do not call
    `run-stack.ps1` or `dotnet run` on the AppHost yourself: `app start` picks the launcher from Orchestra's setting.
    - **AppHost launcher**: it writes this run's resource list to the AppHost's gitignored `appsettings.local.json`
@@ -103,18 +107,16 @@ restart of the .NET services (the web app does not read it).
 
 The app is at http://localhost:9000 (api http://localhost:50544).
 
-## 4. Watch the logs, then hand over
+## 4. Hand over
 
-- **Start the live watcher before you tell the user to test**, on the files `app start` names in its "Live logs:" line
-  (`app logs` lists them: `.run-logs/<service>.log`, like `api.log`, `primary.log`, `secondary.log`, `mission.log`).
-  With the AppHost, Orchestra copies each service's console into these files while the app runs, as plain text.
-  Use the Monitor tool, `tail -n0 -F` on each, filtering for `^fail:`, `Unhandled exception`, `Exception:`, `ERROR`,
-  and HTTP 5xx lines (` HTTP/1.1 … - 5xx `). Label each line with its file. It lasts 30 minutes at most: re-arm it
-  while the user is still testing. Silence is not proof that nothing failed: say so.
+- **No live log watcher.** Do not start a Monitor or `tail -F` on the logs while the user tests: the user watches
+  each service's console in the **Aspire dashboard** (its login line is in `app status`; give it to the user). Note the
+  time the user starts testing, for step 7.
+- **The log files stay, for you.** With the AppHost, Orchestra copies each service's console into
+  `.run-logs/<service>.log` while the app runs, as plain text (`app logs` lists them: `api.log`, `primary.log`,
+  `secondary.log`, `mission.log`, …). You read them when something fails (step 5) and once at the end (step 7).
 - **"Live logs: none yet"** a minute after the app is up means Orchestra's log copier found no Aspire files. Tell the
-  user plainly (Orchestra needs a fix); meanwhile read the service's console in the Aspire dashboard.
-- The **Aspire dashboard** (its login line is in `app status`) is a second place to look: each service's console,
-  structured logs and traces.
+  user plainly (Orchestra needs a fix): you cannot read the logs then, only the user can, in the dashboard.
 - **Tell the user, in plain words:** the app is up (list each service and its state), **which DB it runs on (Global or
   Local)**, what state you changed in the app (for example the selected project), the **exact click path**, the **exact values** to pick in each dialog, and what
   they should see after each step. Leave out anything you did not check, and say that you did not check it.
@@ -126,11 +128,12 @@ The app is at http://localhost:9000 (api http://localhost:50544).
   Network tabs for red lines the api logs cannot show.
 - Wait for the user. They report pass or fail per check.
 
-## 5. The user reports a failure, or the watcher fires
+## 5. The user reports a failure
 
-- When the watcher reports an error, tell the user straight away: which service, the line, and what you think it means.
-- When the user says something failed, read the log lines for that moment (the time they give you, or the last minutes).
-  Say whether it is an api error or a screen problem.
+- Read the log files for that moment (the time they give you, or the last minutes), every service the action goes
+  through (api, then primary / secondary / mission for saves, uploads and XatBot). Look for `^fail:`,
+  `Unhandled exception`, `Exception:`, `ERROR` and HTTP 5xx lines. The user may paste lines from the Aspire dashboard
+  instead: use those. Say whether it is an api error or a screen problem.
 - Find the cause and fix the code (in this run's worktrees only), then restart what changed (`app start` again with the
   same services, or just the web app for a WebClient-only change) and ask the user to retry the failed checks, then the
   rest quickly. **At most 2 fix rounds.** Still failing: stop, say what fails and what you tried, and end with
@@ -150,7 +153,11 @@ for this run's epic, with `--no-start`. Use **one** browser window for the whole
 
 ## 7. Report
 
-A short table: each check, passed or failed (as the user told you), plus anything the log watcher caught. Then the fixes
+**One log check first.** Search the `.run-logs/*.log` files once for error lines since the user started testing
+(`^fail:`, `Unhandled exception`, `Exception:`, `ERROR`, HTTP 5xx), so an error in a service the user did not look at
+is not missed. One search, not a watcher. Leave out what is plainly noise (say so), list the rest with service and time.
+
+A short table: each check, passed or failed (as the user told you), plus the errors that log check found. Then the fixes
 you made (with the commit, if you committed), the state you changed in the app and did not put back (the selected
 project, the forms the test created and on which DB, and **whether `Debug.json` is still switched, with the backup
 path**), and which repos were served from the user's own checkout (not a worktree of this run).
@@ -161,16 +168,15 @@ path**), and which repos were served from the user's own checkout (not a worktre
 the app until the run is cleaned up, so it would keep running with this run's code.
 
 1. After the report, ask the user if they are done with the app (they may want one more look). Wait for the answer.
-2. Stop the log watcher (TaskStop on the Monitor).
-3. Run `app stop`. It stops the launcher's tree, everything on the app's ports, and the hosts with no port that run
+2. Run `app stop`. It stops the launcher's tree, everything on the app's ports, and the hosts with no port that run
    from this workspace (the Spreadsheet Job, the AppHost's resources). Exit code 5 ("not started by Orchestra"): a
    process on the ports is not from a run folder. Ask the user before `app stop --force`.
-4. Check that the app is really down: `http://localhost:9000/`, `http://127.0.0.1:50544/health` and the dashboard
+3. Check that the app is really down: `http://localhost:9000/`, `http://127.0.0.1:50544/health` and the dashboard
    (:15200) no longer answer, and no `Orbitax.*` process from this workspace is left (the Mission consumer, the
    Scheduler, the Spreadsheet Job). If one is, stop its tree (`taskkill /PID <pid> /T /F`) and tell the user, so
    Orchestra can be fixed.
-5. Run `app release`.
-6. Say that the app is stopped and that `Debug.json` is still switched, if it is. Then end as every Orchestra step does:
+4. Run `app release`.
+5. Say that the app is stopped and that `Debug.json` is still switched, if it is. Then end as every Orchestra step does:
    WHAT I DID AND WHY, then `ORCHESTRA:DONE`.
 
 ## Start the app again at a later step ("preqa")
@@ -179,10 +185,10 @@ After the user's own test, QA often comes and tests on the user's PC ("preqa"). 
 the run. The user then calls this skill again, or says "start the app for preqa".
 
 - **Do only the app part:** step 2's questions about the services and the DB, then step 3 (build, take, start, up-check),
-  and the log watcher of step 4. Skip the test plan and the click path: QA has its own.
+  and step 4's dashboard line. Skip the test plan and the click path: QA has its own. No live log watcher.
 - **Do not end the current step.** The run is on another step, so end those replies with neither `ORCHESTRA:DONE` nor
   `ORCHESTRA:FAILED`. Writing `ORCHESTRA:DONE` here would close the step the run is on, and the run would skip it.
 - **What QA finds is tracked work.** Before you fix it, add it as a task on this run's epic. Do not fix it off the books.
   Do not count it as a fix round.
-- **When QA is done**, do step 8's stop (ask, stop the watcher, `app stop`, check the ports, `app release`). Then go
+- **When QA is done**, do step 8's stop (ask, `app stop`, check the ports, `app release`). Then go
   back to the step the run is on.

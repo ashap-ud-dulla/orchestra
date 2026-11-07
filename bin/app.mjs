@@ -5,7 +5,7 @@
 // (the setup's ITP folder), and you hold it until orch app stop. A run that has the app is never pushed out.
 //   build             build this run's code before its turn (no ports, no waiting)
 //   take [--minutes N] join the line and wait for the app (N minutes at most, default 1.5; run it again if still waiting)
-//   start [--services a,b] [--with a,b] [--force]  stop the app that runs now, start it from this run's workspace
+//   start [--services a,b] [--with a,b] [--without a,b] [--force]  stop the app that runs now, start it from this run's workspace
 //                     with the launcher setting (apphost or runstack), wait until it answers
 //   restart [services] restart the app this run started (after a Debug.json switch or a code change)
 //   wait [--minutes N] wait more for an app that is still starting
@@ -33,7 +33,7 @@ const option = (name) => {
   return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : null;
 };
 // The words after the command that are not options or their values.
-const positional = (from) => args.slice(from).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--') && ['--minutes', '--services', '--with', '--lines'].includes(all[i - 1])));
+const positional = (from) => args.slice(from).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--') && ['--minutes', '--services', '--with', '--without', '--lines'].includes(all[i - 1])));
 const list = (text) => [...new Set(String(text || '').split(/[\s,]+/).filter(Boolean).map(launcher.serviceName))];
 const minutes = () => {
   const i = args.indexOf('--minutes');
@@ -329,6 +329,9 @@ function pickServices(how, ws, serving) {
   let services = option('services') ? list(option('services')) : again ? serving.services : launcher.defaultServices(how, ws);
   if (flag('workers') && !option('services')) services = [...new Set([...services, 'primary', 'secondary', 'spreadsheet'])];
   services = [...new Set([...services, ...list(option('with'))])];
+  const without = list(option('without'));
+  services = services.filter((s) => !without.includes(s));
+  if (how === 'apphost' && launcher.missionOff(ws, services)) say('Mission consumer: off. XatBot commands go to Primary for this start (ITP_MissionApis=","); your Debug.json is not changed.');
   const cannot = launcher.unsupported(how, services);
   if (cannot.length && !process.env.ORCHESTRA_APP_START) {
     say(`Note: run-stack.ps1 cannot start ${cannot.join(', ')}. For those: orch settings launcher=apphost`);
@@ -348,9 +351,10 @@ async function launch(actor, ws, how, services) {
   // Your own checkout: the AppHost's appsettings.local.json there is yours. Keep your copy once before Orchestra
   // writes its service list into it.
   const local = path.join(launcher.apphostDir(ws), 'appsettings.local.json');
-  if (actor.id === YOU && how === 'apphost' && fs.existsSync(local) && !fs.existsSync(`${local}.bak-orchestra`)) {
-    fs.copyFileSync(local, `${local}.bak-orchestra`);
-    say(`Kept your AppHost settings as ${local}.bak-orchestra (Orchestra writes the service list into ${path.basename(local)}).`);
+  if (actor.id === YOU && how === 'apphost') {
+    const had = fs.existsSync(launcher.settingsBackup(ws));
+    const backup = launcher.keepSettingsBackup(ws);
+    if (backup && !had) say(`Kept your AppHost settings as ${backup} (Orchestra writes the service list into ${path.basename(local)}).`);
   }
   try {
     const brokersRunning = how === 'apphost' && !process.env.ORCHESTRA_APP_START && brokersListening();
@@ -397,6 +401,7 @@ function appText(app, serving, h) {
   const whose = serving?.runId === YOU ? 'your checkout' : `${serving?.title}'s code`;
   const at = serving ? new Date(serving.startedAt).toTimeString().slice(0, 5) : ''; // this PC's time, not UTC
   lines.push(serving ? `Serving: ${whose} from ${serving.workspace}${serving.branches ? ` (${serving.branches})` : ''}, started ${at}` : 'Serving: not started by Orchestra');
+  if (serving?.services?.length) lines.push(`Services: ${serving.services.join(', ')}`);
   if (h) lines.push(`Answers: api ${h.api ? 'yes' : 'no'} · web ${h.web ? 'yes' : 'no'}`);
   return lines.join('\n');
 }

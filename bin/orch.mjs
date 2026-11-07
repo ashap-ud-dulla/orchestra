@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { withRunner, gb } from '../lib/runner.mjs';
 import { setup } from '../lib/setup.mjs';
-import { listTemplates, getTemplate, saveTemplate, deleteTemplate, validateTemplate, isSafeId, runDir, WRAP_UP_SKILL } from '../lib/store.mjs';
+import { listTemplates, getTemplate, saveTemplate, deleteTemplate, validateTemplate, isSafeId, runDir, WRAP_UP_SKILL, EFFORTS } from '../lib/store.mjs';
 import { scanSkills } from '../lib/skills-scan.mjs';
 import { setMark, offProblems, OFF_HELP } from '../lib/tracking.mjs';
 import { computeStats } from '../lib/stats.mjs';
@@ -33,9 +33,16 @@ const HELP = `Orchestra commands (node bin/orch.mjs <command>):
   boxes <run> --set '<json list>'         change the steps of a run that has not finished
   timeline <run> [--limit N]              the run's log and activity
   app [release <run>]                     who has the app, who waits for it, whose code it serves
-  app start [--services a,b] [--with a,b] [--force]   the app for you, from your own ITP checkout (refused
-                                          while a run has it); you hold it until: app stop
+  app start [--services a,b] [--with a,b] [--without a,b] [--force]   the app for you, from your own ITP
+                                          checkout (refused while a run has it); you hold it until: app stop.
+                                          --without mission: no Mission consumer, XatBot stays on Primary
   app stop | restart | wait | logs [service] | release   your app (logs: <checkout>/.run-logs/<service>.log)
+  back <run> <step> [why]               go back to a finished step (number or name): copies of it and the steps after
+                                          it are added, the old ones stay as history; type next in its tab. In the tab:
+                                          /orchestra back build fix the review findings (starts at once)
+  model <run> [model] [effort]          the model and effort of the step the run is on (only this run). A step
+                                          working now switches when you type "/orchestra model" in its tab. In the tab:
+                                          /orchestra model opus effort high · /orchestra effort max · /orchestra model
   about <run> ["text"]                  what the ticket is about (the run says it by itself; set it by hand here)
   watch <run> [--once]                  the run's steps and pins, redrawn live (the pane on the right of its tab)
   pin <run> ["text"] [--title "…"]       pin text to the run's pane (no text: show its pins in full)
@@ -550,6 +557,42 @@ const commands = {
     if (which !== undefined && which !== 'all' && !/^\d+$/.test(which)) fail('unpin takes a pin number (1 = newest) or all');
     const { run: out, removed } = await r.removePin(run.id, which);
     return { json: { pins: out.pins, removed }, text: `${tabTitle(out)}: unpinned ${removed.map((p) => `"${p.title}"`).join(', ')} (${out.pins.length} left).` };
+  },
+
+  // The model and effort of the step the run is on. Changes only this run. A step that works now switches when
+  // the user types `/orchestra model` in the run's tab (a restart from here could cut claude off mid-work).
+  async model(r, { pos }) {
+    const run = findRun(r, pos[0]);
+    let model;
+    let effort;
+    for (const w of pos.slice(1).map((x) => x.toLowerCase())) {
+      if (w === 'effort') continue;
+      if (EFFORTS.includes(w)) effort = w;
+      else if (w === 'none') { if (model === undefined) model = null; else effort = null; }
+      else model = w;
+    }
+    const { run: out, box, live } = await r.setStepModel(run.id, { model, effort });
+    const now = modelTag(box) || 'the one before (none set)';
+    const lines = [`${tabTitle(out)}: step "${box.label}" (${box.status === 'running' ? 'working now' : box.status === 'failed' ? 'failed' : 'next'}) runs with ${now}.`];
+    if (live) lines.push(`Type "/orchestra model" in its tab to switch now: claude restarts on the same conversation and goes on where it was.`);
+    else if (box.status === 'pending') lines.push('It starts with it when you type next in its tab.');
+    if (box.effort === 'ultracode') lines.push('Ultracode starts many helper agents: deep, but it costs a lot.');
+    lines.push('Only this run changed; the template stays (orch template box … model=… effort=…).');
+    return { json: { box, live }, text: lines.join('\n') };
+  },
+
+  // Go back to a finished step: copies of it and the steps after it are added, and run next (in the tab).
+  async back(r, { pos }) {
+    const run = findRun(r, pos[0]);
+    if (pos.length < 2) fail(`name the step to go back to (its number, or words from its name). ${run.boxes.map((b, i) => (b.status === 'done' ? `${i + 1}. ${b.label}` : null)).filter(Boolean).join(' · ')}`);
+    const { run: out, copies, reset } = await r.goBack(run.id, pos.slice(1).join(' '));
+    const lines = [
+      `${tabTitle(out)}: went back. New steps: ${copies.map((b) => b.label).join(' > ')}.${reset ? ` "${reset.label}" runs again after them.` : ''}`,
+      copies[0].why ? `"${copies[0].label}" is told why: ${copies[0].why}` : `"${copies[0].label}" is told what the steps after it did; it asks you why if that is not clear.`,
+      out.session?.open ? `Type next in its tab to start "${copies[0].label}".` : `Its tab is closed: orch reopen ${ticketKey(out) || out.id}, then type next there.`,
+      'Quicker: in its tab, "/orchestra back build fix the review findings" goes back and starts at once.',
+    ];
+    return { json: { copies, reset }, text: [runDetail(out, []), '', ...lines].join('\n') };
   },
 
   async about(r, { pos }) {

@@ -56,7 +56,7 @@ function start(spec) {
       return closed(1, { force: true });
     }
     const what = next.args.includes('--model') ? next.args[next.args.indexOf('--model') + 1] : 'the same model';
-    if (next.args.includes('--resume')) console.log(`Orchestra: the next step runs with ${what}. Restarting claude on the same conversation…\n`);
+    if (next.args.includes('--resume')) console.log(`Orchestra: now with ${what}. Restarting claude on the same conversation…\n`);
     else console.log(`Orchestra: the next step starts a new conversation (${what}), told the story so far. Starting claude…\n`);
     start(next);
   });
@@ -71,7 +71,7 @@ try {
 
 if (spec) {
   console.log(`Orchestra run ${runId} · ${spec.title}`);
-  console.log('Type "next" to go on after a "wait for me" box, "redo" to run a box again. Talk to Claude as usual.\n');
+  console.log('Type "next" to go on after a "wait for me" box, "redo" to run a box again, "/orchestra model opus effort high" to switch this step\'s model, "/orchestra back build why" to go back to a step. Talk to Claude as usual.\n');
   start(spec);
   // Closing the tab ends this process; pass it on so claude ends too.
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, () => {});
