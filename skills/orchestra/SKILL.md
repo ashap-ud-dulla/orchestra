@@ -30,7 +30,8 @@ Below, `orch <command>` means that full line. `orch help` lists every command.
   folder (the one with `.claude/skills`, `ITP-API`, `ITP-WebClient`), then run `orch setup --itp <folder>` and show
   what it prints (missing tools included). After a `git pull` of Orchestra, `orch setup` again refreshes the skills.
 - Each run opens its own tab in the **"orchestra"** Windows Terminal window (Alt+Tab). The user talks to the run there:
-  `next` after a "wait for me" step, `redo` to run a step again, `/orchestra model opus effort high` (or
+  `next` to go on (after a "wait for me" step, or with a step that was cut off), `redo` to run a step again,
+  `skip` to move past an unfinished step on purpose, `/orchestra model opus effort high` (or
   `/orchestra effort max`, `/orchestra model` to show) to switch the model of the step it is on: Orchestra catches it
   before this skill loads, and claude restarts in the same tab, on the same conversation, going on where it was (no redo).
   **Go back** to a finished step (a code review found problems, say): `/orchestra back build fix the review findings`
@@ -260,5 +261,6 @@ Ask: **Lessons** · **Stats** · **Settings**.
 ## After a PC restart
 
 Run tabs close with the PC. `orch status` shows "N stopped (reopen all)". Offer `orch reopen all`: each tab opens again
-on its own conversation. In each tab the user types `next` (go on) or `redo` (run the step again), or
-"continue" when a long step (like a build) was cut off halfway.
+on its own conversation. In each tab the user types `next`: a step that was cut off halfway (like a build) goes on
+from where it stopped; after a finished step, the next one starts. `redo` runs the step again from the start, and
+`skip` marks it done and moves past it (on purpose only).

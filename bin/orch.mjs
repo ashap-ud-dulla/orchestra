@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { withRunner, gb } from '../lib/runner.mjs';
 import { setup } from '../lib/setup.mjs';
-import { listTemplates, getTemplate, saveTemplate, deleteTemplate, validateTemplate, isSafeId, runDir, WRAP_UP_SKILL, EFFORTS } from '../lib/store.mjs';
+import { listTemplates, getTemplate, saveTemplate, deleteTemplate, validateTemplate, isSafeId, runDir, brokenRuns, WRAP_UP_SKILL, EFFORTS } from '../lib/store.mjs';
 import { scanSkills } from '../lib/skills-scan.mjs';
 import { setMark, offProblems, OFF_HELP } from '../lib/tracking.mjs';
 import { computeStats } from '../lib/stats.mjs';
@@ -426,16 +426,24 @@ async function applySuggestion(r, s, opt) {
 
 // ---------- commands ----------
 
+// Run files Orchestra could not read: named, never hidden (the file is kept as it is).
+function brokenText() {
+  const list = brokenRuns();
+  if (!list.length) return '';
+  const lines = list.map((b) => `  ${b.id}: ${b.error}`);
+  return ['', '', `Could not read ${list.length === 1 ? 'this run file' : 'these run files'} (kept as they are):`, ...lines].join('\n');
+}
+
 const commands = {
   async status(r) {
     const runs = r.list();
     const clean = { stale: r.staleRuns(), finished: r.finishedUncleaned() };
-    return { json: { settings: r.getSettings(), runs, clean: { stale: clean.stale.map((x) => x.id), finished: clean.finished.map((x) => x.id) } }, text: statusLine(runs, r.getSettings(), r.appState(), clean) };
+    return { json: { settings: r.getSettings(), runs, clean: { stale: clean.stale.map((x) => x.id), finished: clean.finished.map((x) => x.id) } }, text: statusLine(runs, r.getSettings(), r.appState(), clean) + brokenText() };
   },
 
   async runs(r, { opt }) {
     const runs = r.list();
-    return { json: runs, text: board(runs, !!opt.all, r.appState()) };
+    return { json: runs, text: board(runs, !!opt.all, r.appState()) + brokenText() };
   },
 
   async run(r, { pos }) {
@@ -484,12 +492,12 @@ const commands = {
       const list = r.list().filter((x) => x.status === 'stopped' && x.sessionId && !x.cleanedAt && !x.session?.open);
       const done = [];
       for (const run of list) done.push(await r.resume(run.id));
-      return { json: done, text: done.length ? `Reopening ${done.length} run${done.length > 1 ? 's' : ''}: ${done.map(tabTitle).join(', ')}. Each tab opens on its own conversation; type next or redo there.` : 'No stopped runs to reopen.' };
+      return { json: done, text: done.length ? `Reopening ${done.length} run${done.length > 1 ? 's' : ''}: ${done.map(tabTitle).join(', ')}. Each tab opens on its own conversation; type next there to go on.` : 'No stopped runs to reopen.' };
     }
     const run = findRun(r, pos[0]);
     const was = run.status;
     const out = await r.resume(run.id);
-    return { json: out, text: was === 'draft' ? `${tabTitle(out)} started.` : `${tabTitle(out)} is ${out.status}. Its tab opens on the same conversation; type next to go on, redo to run the step again.` };
+    return { json: out, text: was === 'draft' ? `${tabTitle(out)} started.` : `${tabTitle(out)} is ${out.status}. Its tab opens on the same conversation; type next to go on, redo to run the step again, skip to move past it.` };
   },
 
   async stop(r, { pos }) {
@@ -970,7 +978,7 @@ function watchFrame(r, width, rows = 0, view = { pin: 1, scroll: 0 }) {
     if (r.about) out.push(...wrap(r.about).slice(0, about).map((l) => l.slice(2)));
     out.push(paint(2, fit(r.templateName)), fit(`${r.status} · ${money(r.cost)}`), '', ...steps);
     out.push('', 'Now:', ...wrap(why(r)).slice(0, now));
-    if (r.status === 'waiting' || r.status === 'needs-you') out.push('', paint('1;33', fit('Type next or redo on the left.')));
+    if (r.status === 'waiting' || r.status === 'needs-you') out.push('', paint('1;33', fit('Type next, redo or skip on the left.')));
     return out;
   };
 

@@ -3,6 +3,7 @@
 // session sends (bin/hook.mjs), use the orch command, and check what Orchestra does with them. The fake claude is used by the lesson-finder.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -23,11 +24,18 @@ fs.copyFileSync(path.join(ROOT, 'test/fixtures/demo-hello-recap.json'), path.joi
 
 // There is no server: every call is a short process (the orch command, a hook, the launcher's runner call).
 // They all get this env; tests that need another ITP folder change it with useEnv.
+// Nothing of this PC leaks in: no Orchestra or Claude settings, no git config (a run tab sets GIT_CONFIG_*), and a
+// git identity of its own.
+const gitConfig = path.join(tmp, 'gitconfig');
+fs.writeFileSync(gitConfig, '[user]\n\tname = Orchestra Test\n\temail = test@example.com\n');
 const baseEnv = (() => {
   const e = { ...process.env };
-  for (const k of Object.keys(e)) if (/^ORCHESTRA_/.test(k)) delete e[k];
-  return e;
+  for (const k of Object.keys(e)) if (/^(ORCHESTRA_|GIT_CONFIG|CLAUDE_)/.test(k)) delete e[k];
+  return { ...e, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1' };
 })();
+// The tests' own personal skills folder, with the test skills (orchestra-hello, orchestra-recap). Never this PC's.
+const homeSkills = path.join(tmp, 'home-skills');
+fs.cpSync(path.join(ROOT, 'test/skills'), homeSkills, { recursive: true });
 let env;
 // The tests never use this PC's ITP folder: one of their own, with one team skill (a test that needs repos makes a
 // fake ITP with git repos).
@@ -35,7 +43,7 @@ const testItp = path.join(tmp, 'itp-base').replace(/\\/g, '/');
 fs.mkdirSync(path.join(testItp, '.claude', 'skills', 'review-changes'), { recursive: true });
 fs.writeFileSync(path.join(testItp, '.claude', 'skills', 'review-changes', 'SKILL.md'), '---\nname: review-changes\ndescription: a team skill\n---\nReview.\n');
 function useEnv(extra = {}) {
-  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
+  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
 }
 useEnv();
 
@@ -834,23 +842,40 @@ test('no marker: the run needs you; FAILED fails; redo runs the box again; next 
   assert.equal(now.status, 'failed');
   assert.equal(now.boxes[0].failures, 1);
   assert.match(now.boxes[0].error, /locked/);
+  // next on a failed step does not move past it: it says redo or skip.
+  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /"Say hello" failed[\s\S]*redo[\s\S]*skip/);
+  assert.equal((await getRun(run.id)).boxes[0].status, 'failed');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'redo' })), /run this step again.*\/orchestra-hello/);
   now = await getRun(run.id);
   assert.deepEqual([now.status, now.boxes[0].status, now.boxes[0].attempts], ['running', 'running', 2]);
 
-  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-recap/);
+  // next on a step that has not said it is done goes on with it (never marks it done); skip moves past it.
+  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /go on with the step "Say hello" from where you stopped \(do not start it again\)/);
   now = await getRun(run.id);
-  assert.equal(now.boxes[0].note, 'marked done by you (next)');
+  assert.deepEqual([now.status, now.boxes[0].status, now.boxes[1].status], ['running', 'running', 'pending']);
+  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'skip' })), /\/orchestra-recap/);
+  now = await getRun(run.id);
+  assert.equal(now.boxes[0].note, 'skipped by you');
   assert.equal(now.boxes[1].status, 'running');
   await hook(run, 'Stop', done('recap'));
   assert.equal((await getRun(run.id)).status, 'done');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /All steps .* are done/);
+  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'skip' })), /All steps .* are done/);
   await close(run);
 });
 
 // ---- the app, one run at a time (bin/app.mjs) ----
 
-const APP_PORTS = 'api=47811,web=47812';
+// Two ports that are free on this PC now, never fixed ones another program may hold.
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => {
+    const { port } = srv.address();
+    srv.close(() => resolve(port));
+  });
+});
+const API_PORT = await freePort();
+const WEB_PORT = await freePort();
+const APP_PORTS = `api=${API_PORT},web=${WEB_PORT}`;
 const appEnv = (run) => ({
   ORCHESTRA_RUN_ID: run.id,
   ORCHESTRA_HOOK_TOKEN: run.hookToken,
@@ -861,7 +886,7 @@ const appEnv = (run) => ({
 const app = (run, ...args) => proc([path.join(ROOT, 'bin/app.mjs'), ...args], { extraEnv: run ? appEnv(run) : { ORCHESTRA_APP_PORTS: APP_PORTS } });
 const appUp = async () => {
   try {
-    return (await fetch('http://localhost:47811/health')).ok;
+    return (await fetch(`http://localhost:${API_PORT}/health`)).ok;
   } catch {
     return false;
   }
@@ -1195,7 +1220,7 @@ test('app: stop leaves an editor that has the folder open alone (only the app\'s
 test('app: health asks 127.0.0.1 first (the api listens on IPv4 only)', async () => {
   const v4 = spawn(process.execPath, [path.join(ROOT, 'test/fake-app.mjs'), 'v4'], { env: { ...env, ORCHESTRA_APP_PORTS: APP_PORTS, FAKE_APP_HOST: '127.0.0.1' }, stdio: 'ignore' });
   try {
-    await waitFor(async () => { try { return (await fetch('http://127.0.0.1:47811/health')).ok; } catch { return false; } }, 'the IPv4 app');
+    await waitFor(async () => { try { return (await fetch(`http://127.0.0.1:${API_PORT}/health`)).ok; } catch { return false; } }, 'the IPv4 app');
     assert.match((await app(null, 'status')).out, /Answers: api yes · web yes/);
   } finally {
     v4.kill();
@@ -1244,10 +1269,10 @@ test('a "wait for me" box stops the run; next goes on; you are notified', async 
   let now = await getRun(run.id);
   assert.equal(now.status, 'waiting');
   assert.equal(now.waitingAfter, 'hello');
-  // The pane: "Type next or redo" has its own color (not the pin's cyan) and an empty line before the pin.
+  // The pane: "Type next, redo or skip" has its own color (not the pin's cyan) and an empty line before the pin.
   await orch('pin', run.id, 'step one');
   const pane = (await proc([path.join(ROOT, 'bin/orch.mjs'), 'watch', run.id, '--once', '--rows', '30', '--cols', '40'])).out.split('\n');
-  const hintAt = pane.findIndex((l) => l.includes('Type next or redo'));
+  const hintAt = pane.findIndex((l) => l.includes('Type next, redo or skip'));
   assert.ok(pane[hintAt].startsWith('\x1b[1;33m'), 'bold yellow');
   assert.deepEqual([pane[hintAt + 1], /Pinned/.test(pane[hintAt + 2])], ['', true]);
   await orch('unpin', run.id, 'all');
@@ -1289,12 +1314,12 @@ test('a closed tab stops the run; Reopen resumes the same session; a restart not
   await hook(run, 'SessionEnd', { reason: 'exit' });
   let now = await getRun(run.id);
   assert.deepEqual([now.status, now.session.open], ['stopped', false]);
-  assert.match(now.boxes[1].note, /terminal closed/);
+  assert.match(now.boxes[1].note, /Cut off: the tab closed[\s\S]*next to go on with it, or redo/);
   await runnerCall('onClosed', [run.id, run.hookToken]); // the launcher too: nothing more happens
   assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 200);
   now = await waitFor(async () => ((await getRun(run.id)).session?.open ? getRun(run.id) : null), 'the reopened session');
   assert.equal(now.status, 'needs-you');
-  assert.match(now.note, /Reopened on the same session/);
+  assert.match(now.note, /Reopened on the same conversation\. Type next to go on with the step, redo to start it again, skip to move past it/);
   const spec = (await launch(now, fakeLauncher())).body;
   assert.equal(spec.args[spec.args.indexOf('--resume') + 1], run.sessionId);
   assert.ok(!spec.args.includes('/orchestra-recap'), 'no prompt: you type next or redo');
@@ -1307,6 +1332,122 @@ test('a closed tab stops the run; Reopen resumes the same session; a restart not
   await launch(now, 999999);
   now = await getRun(run.id);
   assert.deepEqual([now.status, now.session.open], ['stopped', false]);
+});
+
+// A run file written straight to disk, for states that are hard to reach by hooks.
+function writeRun(id, fields) {
+  fs.mkdirSync(path.join(runsDir, id), { recursive: true });
+  fs.writeFileSync(path.join(runsDir, id, 'state.json'), JSON.stringify({
+    id, templateId: 'demo-hello-recap', templateName: 'Demo', tracking: true, input: { text: id }, hookToken: 'tok', chat: [], cost: 0,
+    cwd: path.join(runsDir, id, 'work'), repoPlan: [], workspace: null, createdAt: new Date().toISOString(),
+    boxes: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', status: 'pending' }],
+    ...fields,
+  }));
+}
+
+test('safety: a run stuck starting fails with a reason; stop works on it; an unfinished workspace is cleaned', async () => {
+  // Its starter ended (pid 999999 is not alive) before the tab opened.
+  const id = 'run-20200101000000-stuck0';
+  writeRun(id, { status: 'running', session: null, starting: { pid: 999999, at: Date.now() } });
+  let now = await getRun(id);
+  assert.equal(now.status, 'failed');
+  assert.match(now.error, /never finished starting[\s\S]*Reopen it/);
+  assert.equal(now.starting, undefined);
+  // Old runs with no start mark and no tab are stuck too; stop takes them out.
+  const old = 'run-20200101000000-stuck1';
+  writeRun(old, { status: 'running', session: { open: false } });
+  assert.equal((await getRun(old)).status, 'failed');
+  // A start that is still going on (this test's own pid is alive) is left alone; stop still stops it.
+  const live = 'run-20200101000000-stuck2';
+  writeRun(live, { status: 'running', session: null, starting: { pid: process.pid, at: Date.now() - 25 * 60 * 1000 } });
+  assert.equal((await getRun(live)).status, 'failed', 'started more than 20 minutes ago: stuck');
+  writeRun(live, { status: 'running', session: null, starting: { pid: process.pid, at: Date.now() } });
+  assert.equal((await getRun(live)).status, 'running');
+  assert.equal((await api('POST', `/api/runs/${live}/stop`)).status, 200);
+  assert.equal((await getRun(live)).status, 'running', 'its start is still going on: stop waits');
+  writeRun(live, { status: 'running', session: { open: false }, starting: { pid: 999999, at: Date.now() } });
+  assert.equal((await getRun(live)).status, 'failed');
+  // A workspace whose build was cut off: clean-up removes its folder.
+  const half = path.join(tmp, 'o-half');
+  fs.mkdirSync(path.join(half, 'some-link-target'), { recursive: true });
+  writeRun(id, { status: 'failed', session: null, workspace: { dir: half.replace(/\\/g, '/'), repos: [], ready: false } });
+  assert.equal((await orch('clean', id)).status, 200);
+  assert.ok(!fs.existsSync(half), 'the unfinished workspace is gone');
+  for (const r of [id, old, live]) await orch('delete', r, '--force');
+});
+
+test('safety: a tab whose alive file stopped moving is gone, even when its pid lives on; broken run files are named', async () => {
+  const id = 'run-20200101000000-alive0';
+  // Its launcher pid is alive (this process: as if Windows reused it), but the alive file is 11 minutes old.
+  writeRun(id, { status: 'needs-you', session: { open: true, pid: process.pid, openedAt: new Date(Date.now() - 3600000).toISOString() }, sessionId: 's1', sessionSeen: true });
+  const beat = path.join(runsDir, id, 'tab-alive');
+  fs.writeFileSync(beat, '1');
+  const old = new Date(Date.now() - 11 * 60 * 1000);
+  fs.utimesSync(beat, old, old);
+  let now = await getRun(id);
+  assert.deepEqual([now.status, now.session.open], ['stopped', false]);
+  // A fresh alive file keeps the tab open, whatever its pid says.
+  writeRun(id, { status: 'needs-you', session: { open: true, pid: 999999, openedAt: new Date(Date.now() - 3600000).toISOString() }, sessionId: 's1', sessionSeen: true });
+  fs.writeFileSync(beat, '1');
+  now = await getRun(id);
+  assert.equal(now.session.open, true);
+  // Old for a minute, but its pid lives (a PC that just woke up): still open.
+  writeRun(id, { status: 'needs-you', session: { open: true, pid: process.pid, openedAt: new Date(Date.now() - 3600000).toISOString() }, sessionId: 's1', sessionSeen: true });
+  const min2 = new Date(Date.now() - 2 * 60 * 1000);
+  fs.utimesSync(beat, min2, min2);
+  assert.equal((await getRun(id)).session.open, true);
+  writeRun(id, { status: 'stopped', session: { open: false } });
+  await orch('delete', id, '--force');
+  // A run file that cannot be read is named on the board and in status, and is not lost.
+  const bad = 'run-20200101000000-broke0';
+  fs.mkdirSync(path.join(runsDir, bad), { recursive: true });
+  fs.writeFileSync(path.join(runsDir, bad, 'state.json'), '{ not json');
+  const board = await orchText('runs');
+  assert.match(board.out, /Could not read this run file \(kept as they are\):\n {2}run-20200101000000-broke0: /);
+  assert.match((await orchText('status')).out, /run-20200101000000-broke0/);
+  assert.ok(fs.existsSync(path.join(runsDir, bad, 'state.json')));
+  fs.rmSync(path.join(runsDir, bad), { recursive: true, force: true });
+});
+
+test('safety: claude from npm (claude.cmd) runs its script with node; a failed hook says so in the tab', async () => {
+  const { claudeCommand, shimScript } = await import('../lib/claude-cmd.mjs');
+  const { config } = await import('../lib/config.mjs');
+  const { failedOutput: failedOutputFor } = await import('../lib/hook-handler.mjs');
+  const bin = path.join(tmp, 'npm-bin');
+  const cli = path.join(bin, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.writeFileSync(cli, '');
+  // What npm writes for a package's command (shortened).
+  fs.writeFileSync(path.join(bin, 'claude.cmd'), '@ECHO off\r\nSETLOCAL\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n)\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+  assert.equal(shimScript(path.join(bin, 'claude.cmd')), cli);
+  const was = config.claudeBin;
+  try {
+    config.claudeBin = path.join(bin, 'claude.cmd');
+    assert.deepEqual(claudeCommand(['-p', 'hi']), { cmd: process.execPath, args: [cli, '-p', 'hi'] });
+    config.claudeBin = path.join(bin, 'claude.exe');
+    assert.deepEqual(claudeCommand(['x']), { cmd: path.join(bin, 'claude.exe'), args: ['x'] });
+  } finally {
+    config.claudeBin = was;
+  }
+  // When a hook fails, Orchestra's own words are blocked with the reason (they never reach Claude as talk).
+  const err = new Error('Orchestra is busy');
+  assert.match(failedOutputFor('UserPromptSubmit', { prompt: 'next' }, err).output.reason, /could not handle "next": Orchestra is busy\. Try again/);
+  assert.equal(failedOutputFor('UserPromptSubmit', { prompt: '/orch back build' }, err).output.decision, 'block');
+  assert.equal(failedOutputFor('UserPromptSubmit', { prompt: 'what is next?' }, err).output.decision, undefined, 'talk goes on to Claude');
+  assert.match(failedOutputFor('Stop', {}, err).output.systemMessage, /could not move the run on/);
+  assert.deepEqual(failedOutputFor('PostToolUse', {}, err), {});
+});
+
+test('safety: a lock whose holder stopped writing its time is taken over, even when the pid is alive', async () => {
+  const lock = path.join(runsDir, '.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  // This process is alive, but the time has not moved for 2 minutes: the holder is gone (its pid was reused).
+  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'gone', at: Date.now() - 120000 }));
+  const t = Date.now();
+  const r = await orchText('runs');
+  assert.equal(r.code, 0, r.err);
+  assert.ok(Date.now() - t < 10000, 'taken over at once');
+  assert.ok(!fs.existsSync(path.join(lock, 'owner.json')) || JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8')).token !== 'gone');
 });
 
 test('a run saved by the old background mode becomes a stopped run that reopens its session', async () => {
@@ -2047,21 +2188,34 @@ test('a tab opened by the old server version still works with no server', async 
   await close(run);
 });
 
+// node test/smoke.mjs [words…]: only the tests whose name has one of the words (any case).
+// ORCHESTRA_TEST_TIMEOUT: the time limit per test in seconds (default 180), so a hung test fails with its name.
+const words = process.argv.slice(2).map((w) => w.toLowerCase());
+const chosen = words.length ? tests.filter(([name]) => words.some((w) => name.toLowerCase().includes(w))) : tests;
+if (!chosen.length) console.log(`No test name has: ${words.join(', ')}`);
+const LIMIT_S = Number(process.env.ORCHESTRA_TEST_TIMEOUT || 180);
 let failed = 0;
 try {
-  for (const [name, fn] of tests) {
+  for (const [name, fn] of chosen) {
+    const started = Date.now();
+    let timer;
     try {
-      await fn();
-      console.log(`ok   ${name}`);
+      await Promise.race([fn(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`took more than ${LIMIT_S} s`)), LIMIT_S * 1000); })]);
+      console.log(`ok   ${name} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
     } catch (err) {
       failed++;
       console.log(`FAIL ${name}\n     ${err.stack}`);
+    } finally {
+      clearTimeout(timer);
     }
+    // Picked tests run without the ones between them, which would have stopped the runs left open: stop them, so
+    // they do not hold the run slots.
+    if (words.length) for (const r of (await api('GET', '/api/runs')).body) if (r.session?.open || ['running', 'queued'].includes(r.status)) await close(r);
   }
 } finally {
   for (const p of sleepers) p.kill();
   await new Promise((r) => setTimeout(r, 1500)); // background jobs (tick, lessons) end
   fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
 }
-console.log(failed ? `\n${failed} failed` : `\nall ${tests.length} passed`);
+console.log(failed ? `\n${failed} failed` : `\nall ${chosen.length} passed`);
 process.exit(failed ? 1 : 0);

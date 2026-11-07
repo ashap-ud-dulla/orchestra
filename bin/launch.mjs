@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { childEnv } from '../lib/env.mjs';
 import { withRunner } from '../lib/runner.mjs';
-import { runDir, RESTART_FLAG } from '../lib/store.mjs';
+import { runDir, RESTART_FLAG, TAB_ALIVE } from '../lib/store.mjs';
 import { killTree } from '../lib/app.mjs';
 
 const [runId, token] = process.argv.slice(2);
@@ -39,8 +39,12 @@ function start(spec) {
     restarting = true;
     setTimeout(() => killTree(child.pid), RESTART_GRACE_MS);
   }, 1000);
-  child.on('error', (err) => {
+  child.on('error', async (err) => {
     clearInterval(watch);
+    // Tell Orchestra first, so the run says "failed: claude could not start" instead of "running".
+    try {
+      await withRunner((r) => r.onClosed(runId, token, { error: err.message }), { detach: true, lockMs: 20000 });
+    } catch {}
     wait(`Could not start claude: ${err.message}`);
   });
   child.on('exit', async (code) => {
@@ -66,12 +70,33 @@ let spec;
 try {
   spec = await withRunner((r) => r.launchSpec(runId, token, process.pid), { detach: true });
 } catch (err) {
+  try {
+    await withRunner((r) => r.onClosed(runId, token, { error: err.message }), { detach: true, lockMs: 20000 });
+  } catch {}
   wait(`Orchestra could not start this run: ${err.message}`);
 }
 
+// The tab is alive: this file's time moves every 10 s while the launcher runs. Orchestra trusts it over the pid,
+// which Windows may give to another program once this one has ended.
+const beatFile = path.join(runDir(runId), TAB_ALIVE);
+const beat = () => {
+  try {
+    fs.writeFileSync(beatFile, String(process.pid));
+  } catch {}
+};
+beat();
+setInterval(beat, 10000).unref();
+
 if (spec) {
   console.log(`Orchestra run ${runId} · ${spec.title}`);
-  console.log('Type "next" to go on after a "wait for me" box, "redo" to run a box again, "/orchestra model opus effort high" to switch this step\'s model, "/orchestra back build why" to go back to a step. Talk to Claude as usual.\n');
+  console.log([
+    'Type in this tab (or just talk to Claude):',
+    '  next          go on (after a step that waits for you, or with a step that was cut off)',
+    '  redo / skip   run this step again / move past it',
+    '  pin           keep Claude\'s last answer in the pane on the right',
+    '  /orchestra model opus effort high · /orchestra back <step> <why>',
+    '',
+  ].join('\n'));
   start(spec);
   // Closing the tab ends this process; pass it on so claude ends too.
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, () => {});
