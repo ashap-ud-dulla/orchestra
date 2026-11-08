@@ -1,7 +1,7 @@
 ---
 name: orch
 description: Orchestra, the user's personal workflow runner, from the terminal. Start tickets or jobs as runs (one terminal tab each), see the runs board, build templates from skills, find skills, lessons, stats and settings. Use when the user types /orch (with or without words after it) or asks to start tickets with a template, see their runs, reopen runs, or build a workflow template.
-argument-hint: "[ticket | runs | run <ticket> | next | back <step> | model | steps | app | help]"
+argument-hint: "[ticket | runs | run <ticket> | next | go <step> | model | steps | app | help]"
 allowed-tools: Bash(node {{ORCHESTRA}}/bin/orch.mjs *), AskUserQuestion, mcp__claude_ai_Atlassian__getAccessibleAtlassianResources, mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql
 ---
 
@@ -36,10 +36,11 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
   `skip` to move past an unfinished step on purpose, `/orch model opus effort=high` (or
   `/orch effort max`, `/orch model` to show) to switch the model of the step it is on: Orchestra catches it
   before this skill loads, and claude restarts in the same tab, on the same conversation, going on where it was (no redo).
-  **Go back** to a finished step (a code review found problems, say): `/orch back build fix the review findings`
-  (also `/orch from 5 …`; the step by number or name, then why). Copies of that step and the steps after it go
-  in as new steps ("Build (2)", …), the old ones stay as history, and the first copy starts at once, told why and
-  what the later steps found. The tab is split: the pane on the right shows the
+  **Go to any step**, back or forward: `/orch go build fix the review findings` (also `back`, `jump`, `from`; the step
+  by number or name, then why). Back: that step and every step after it run again (no copies); what they did before
+  stays as history ("try 1"), and the step is told why and what the later steps found. Forward: the steps between are
+  marked skipped (not done) and the step is told so: a handover is `/orch go wrap-up handing over to <name>` (pushing
+  the vault works only inside Wrap up). The step starts at once. The tab is split: the pane on the right shows the
   run's steps live (done / working now / to come). To see them in another terminal: `orch watch <ticket>` (Ctrl+C ends it).
 - **Pins**: below the steps, the pane keeps instructions the user follows by hand (test steps, values to pick), so
   they stay in sight while the user chats. The run's Claude pins steps by itself (an `ORCHESTRA:PIN` block). In the
@@ -75,7 +76,7 @@ Match what the user typed and skip the menu:
 | `skills <words>` | `orch skills <words>` |
 | `learn`, `lessons` | **Lessons** |
 | `stats` | `orch stats` |
-| `back <ticket> <step> …`, "go back to build", "start again from step 5" | `orch back <ticket> <step> [why]`, then tell them to type `next` in its tab (or, quicker, `/orch back <step> why` in the tab itself: it starts at once). No ticket: ask which run. |
+| `go <ticket> <step> …`, `back …`, "go back to build", "start again from step 5", "skip to wrap up", "hand it over" | `orch go <ticket> <step> [why]`. With the tab open and Claude idle it starts at once; while Claude works it is refused (then: `/orch go <step> why` in the tab); with the tab closed the run moves and the step starts after `orch reopen` + `next`. Going forward skips the steps between: say so in one line first. No ticket: ask which run. |
 | `model <ticket> …`, "use opus for this step" | `orch model <ticket> <model> [effort=…]` (see **Templates & skills**). No ticket: ask which run (`orch runs`). |
 | `next / skip / redo <ticket>` | the same `orch` command: like typing it in the run's tab (its claude restarts on the same conversation to get it). It refuses while the run works or waits at an Allow prompt: say so. |
 | `steps <ticket or template> …` | `orch steps … [show|add|set|remove|move]`: the same verbs for a run and a template |

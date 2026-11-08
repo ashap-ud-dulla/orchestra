@@ -24,7 +24,8 @@ Everything: `/orch help`.
 | Go on / skip / redo from here | `/orch next 14877` · `/orch skip 14877` · `/orch redo 14877` |
 | Its steps | `/orch steps 14877` · `… add app-test after=build wait=on` · `… set review model=opus` · `… remove 5` · `… move review to=3` |
 | A template's steps | the same: `/orch steps feature-template …` |
-| Go back to a step | `/orch back 14877 build fix the review findings` |
+| Go to a step (back or forward) | `/orch go 14877 build fix the review findings` |
+| Hand over / push the vault now | `/orch go 14877 wrap-up handing over to Samiul` (skips the steps between) |
 | Model of the step now | `/orch model 14877 opus effort=high` |
 | Who has the app | `/orch app` |
 | Reopen tabs (after a restart) | `/orch reopen all` · `/orch reopen 14929` |
@@ -45,7 +46,7 @@ Three runs work at once (`/orch settings max=2` to change). The rest wait in lin
 | `next` | Go on: after a step that waits for you, or with a step that was cut off |
 | `skip` | Mark the step done and move past it (on purpose) |
 | `redo` | Run the step again from the start |
-| `/orch back build fix the tests` | Go back to a finished step, and start it again at once |
+| `/orch go build fix the tests` | Go to any step at once. Back: it and the steps after run again. Forward: the steps between are skipped |
 | `/orch model opus effort=high` | This step's model and effort (claude restarts on the same conversation) |
 | `pin` · `pin 2` · `pin: your note` | Keep Claude's last answer (or the one before, or your note) in the right pane |
 | `unpin` · `unpin 2` · `unpin all` | Remove pins |

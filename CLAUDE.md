@@ -40,6 +40,9 @@ Orchestra only touches ITP in three ways:
   the run must change. Commands that only show things (and `start`) never do slow work: queued runs start in their own
   process each (`orch tick <id>`, the run's "starter"), so workspaces build side by side. A hook starts at most one
   pending `orch tick` (`runs/.tick-pending`).
+- `go` (also back, jump): moves a run to any step on its own steps (no copies). Back resets that step and the ones
+  after it to pending, keeping each one's earlier results in `step.tries`; forward marks the steps between `skipped`
+  (status; `PASSED` = done or skipped in `lib/run/steps.mjs`) and tells the step (`jumpedOver`, `why`).
 - App queue: a step that needs the app while another run has it never blocks a hook: the run waits (`appNext`), its
   tab stays free, its slot is freed, and once the app is free its idle claude is restarted on the same conversation
   with the step (`startAppWaiters`, via `restart.ok`). Notifications only for an Allow prompt, a question, a next

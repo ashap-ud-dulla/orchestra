@@ -565,7 +565,7 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   await close(run);
 });
 
-test('back: "/orchestra back <step> why" copies the steps from there, keeps the old ones, and starts the copy', async () => {
+test('go back: "/orch go <step> why" runs the template\'s own step again (no copies), and the steps after it; the first try stays as history', async () => {
   const run = await startRun([
     { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', wait: true },
     { id: 'recap', skill: 'orchestra-recap', label: 'Recap', wait: true },
@@ -577,41 +577,88 @@ test('back: "/orchestra back <step> why" copies the steps from there, keeps the 
   await say('next');
   await hook(run, 'Stop', done('recap'));
   assert.equal((await getRun(run.id)).status, 'waiting');
-  // A step that has not finished, or a name that fits none: said, nothing changes.
-  assert.match((await say('/orchestra back 3')).reason, /no finished step "3"\. Finished steps: 1\. Say hello · 2\. Recap/);
-  assert.match((await orchText('back', run.id, 'nothing')).err, /no finished step "nothing"/);
-  assert.equal((await getRun(run.id)).steps.length, 3);
-  // Back to step 1 with a why: copies of 1 and 2 after step 2, the first starts on this conversation.
-  const o = await say('/orchestra back say hello the greeting is wrong');
+  // A name that fits no step: said, nothing changes.
+  assert.match((await say('/orch go nothing')).reason, /no step "nothing". Steps: 1. Say hello \(done\) · 2\. Recap \(done\) · 3\. Last\./);
+  // Back to step 1 with a why: steps 1 and 2 run again (no copies), step 1 starts on this conversation.
+  const o = await say('/orch go say hello the greeting is wrong');
   assert.equal(o.decision, 'block');
-  assert.match(o.reason, /Added after "Recap": Say hello \(2\) > Recap \(2\)\. "Say hello \(2\)" starts on this conversation/);
+  assert.match(o.reason, /went back to "Say hello" \(it and the 1 step after it run again\)\. It starts on this conversation/);
   let now = await getRun(run.id);
-  assert.deepEqual(now.steps.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'hello-2:running', 'recap-2:pending', 'last:pending']);
-  assert.equal(now.steps[3].wait, true, 'a copy keeps its settings');
+  assert.deepEqual(now.steps.map((s) => `${s.id}:${s.status}`), ['hello:running', 'recap:pending', 'last:pending'], 'no copies');
+  assert.equal(now.steps[0].tries.length, 1, 'the first try is kept');
+  assert.match(now.steps[0].tries[0].didWhy, /I did hello/);
+  assert.equal(now.steps[0].attempts, 2);
+  assert.equal(now.steps[1].tries.length, 1);
   assert.equal(now.restart.fresh, false);
-  assert.ok(!chatOf(now).some((m) => /^\/orchestra back/.test(m.text)), 'a tab command, not talk');
+  assert.ok(!chatOf(now).some((m) => /^\/orch go/.test(m.text)), 'a tab command, not talk');
   const { body: spec } = await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
   const p = spec.args.at(-1);
-  assert.equal(spec.args[spec.args.indexOf('--resume') + 1], run.sessionId);
-  assert.match(p, /step "Say hello \(2\)": run the skill \/orchestra-hello/);
-  assert.match(p, /went back to this step[\s\S]*Why the user went back: the greeting is wrong[\s\S]*- Recap \(\/orchestra-recap\)/);
-  // While a copy works, the CLI refuses; in the tab, going back again puts the working step back in line.
-  assert.match((await orchText('back', run.id, 'recap')).err, /working now/);
-  assert.match((await say('/orchestra from recap: wrong words')).reason, /Recap \(3\)\. "Say hello \(2\)" runs again after them/);
-  now = await getRun(run.id);
-  assert.deepEqual(now.steps.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'recap-3:running', 'hello-2:pending', 'recap-2:pending', 'last:pending']);
-  assert.equal(now.steps[2].why, 'wrong words');
-  await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
-  // The CLI on a waiting run: adds the copies, starts nothing; next starts them.
-  await hook(run, 'Stop', done('recap-3'));
-  assert.equal((await getRun(run.id)).status, 'waiting');
-  const cli = await orchText('back', run.id, '1');
-  assert.equal(cli.code, 0, cli.err);
-  assert.match(cli.out, /went back\. New steps: Say hello \(3\) > Recap \(4\) > Recap \(5\)\.[\s\S]*asks you why[\s\S]*Type next in its tab/);
-  now = await getRun(run.id);
-  assert.equal(now.steps.find((b) => b.id === 'hello-3').status, 'pending');
-  assert.equal(now.restart, null);
+  assert.match(p, /step "Say hello": run the skill \/orchestra-hello/);
+  assert.match(p, /went back to this step[\s\S]*Why the user went back: the greeting is wrong[\s\S]*- Recap \(\/orchestra-recap\): .*I did recap/);
+  assert.match((await orchText('run', run.id, 'full=yes')).out, /1\. Say hello[^\n]*running[^]*try 1: done/);
+  // `back` is another name for it.
+  await hook(run, 'Stop', done('hello again'));
+  assert.match((await say('/orch back 1')).reason, /went back to "Say hello"/);
+  assert.equal((await getRun(run.id)).steps[0].tries.length, 2);
   await close(run);
+});
+
+test('go forward: jump to Wrap up for a handover; the steps between are skipped, Wrap up starts, may push the vault, and is told why', async () => {
+  // Tracking on: the ITP Wrap up writes to the vault.
+  if (!(await orch('template', 'show', 'go-demo')).body.id) {
+    assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'go-demo')).code, 0);
+    assert.equal((await orchText('template', 'set', 'go-demo', 'tracking=on')).code, 0);
+  }
+  const run = await startRun([
+    { id: 'logs', skill: 'orchestra-hello', label: 'Find it', wait: true },
+    { id: 'plan', skill: 'orchestra-recap', label: 'Plan' },
+    { id: 'build', skill: 'orchestra-hello', label: 'Build' },
+    { id: 'wrap', skill: 'wrap-up', label: 'Wrap up' },
+  ], { templateId: 'go-demo' });
+  await launch(run, fakeLauncher());
+  await hook(run, 'Stop', done('found it'));
+  const o = (await hook(run, 'UserPromptSubmit', { prompt: '/orch go wrap up handing over to Samiul' })).body.output;
+  assert.match(o.reason, /went to "Wrap up" \(skipped: Plan, Build\)/);
+  const now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.status), ['done', 'skipped', 'skipped', 'running']);
+  assert.match(now.steps[1].note, /Skipped: you went to "Wrap up" \(handing over to Samiul\)/);
+  assert.ok(fs.existsSync(path.join(runsDir, run.id, 'wrap-up.ok')), 'the vault may be pushed now (after Allow)');
+  assert.match(now.launchPrompt, /\/wrap-up[^]*went straight to this step\. Steps skipped to get here \(not done\): Plan, Build\. Why: handing over to Samiul\. Do not do the skipped steps/);
+  assert.match((await orchText('run', run.id)).out, /2\. Plan \(\/orchestra-recap\) · skipped[^]*Skipped: you went to/);
+  assert.match((await orchText('runs')).out, /4\/4 Wrap up/);
+  // Wrap up done: the run is done (the skipped steps are passed over).
+  await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  await hook(run, 'Stop', done('handed over'));
+  assert.equal((await getRun(run.id)).status, 'done');
+  // And go can return to a skipped step later.
+  const back = (await hook(run, 'UserPromptSubmit', { prompt: '/orch go plan we got the ticket back' })).body.output;
+  assert.match(back.reason, /went back to "Plan"/);
+  assert.deepEqual((await getRun(run.id)).steps.map((s) => s.status), ['done', 'running', 'pending', 'pending']);
+  await close(run);
+  fs.rmSync(path.join(dataDir, 'templates', 'go-demo.json'));
+});
+
+test('go from outside: a working run is refused; a waiting one starts at once; a step working now is skipped when you jump', async () => {
+  const run = await startRun([{ id: 'a', skill: 'orchestra-hello', wait: true }, { id: 'b', skill: 'orchestra-recap' }, { id: 'c', skill: 'orchestra-hello' }]);
+  await launch(run, fakeLauncher());
+  assert.match((await orchText('go', run.id, 'c')).err, /it is working now/);
+  // In the tab, a jump past the step working now skips it.
+  const o = (await hook(run, 'UserPromptSubmit', { prompt: '/orch jump c' })).body.output;
+  assert.match(o.reason, /went to "orchestra-hello" \(skipped: orchestra-hello, orchestra-recap\)/);
+  let now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.status), ['skipped', 'skipped', 'running']);
+  await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  await hook(run, 'Stop', done('c'));
+  // From outside, on a finished run with its tab open: it starts at once.
+  const out = await orchText('go', run.id, 'b', 'one more look');
+  assert.equal(out.code, 0, out.err);
+  now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.status), ['skipped', 'running', 'pending']);
+  assert.ok(now.restart, 'its claude restarts to start it');
+  await close(run);
+  // Tab closed: the run moves; the step starts when you reopen it and type next.
+  const moved = await orchText('go', run.id, 'a');
+  assert.match(moved.out, /went back to "orchestra-hello"[^]*Its tab is closed/);
 });
 
 test('models: the launcher stops claude and starts it again in the same tab with the next step\'s model', async () => {
