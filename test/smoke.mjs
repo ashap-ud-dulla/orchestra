@@ -1594,8 +1594,14 @@ test('app lock: a step that needs the app waits in line with its tab free, and s
   assert.match((await orchText('app')).out, /demo/, 'orch app lists it in line');
   // next while the app is busy: it says why, and keeps its place.
   assert.match(context(await hook(b, 'UserPromptSubmit', { prompt: 'next' })), /Waiting for the app/);
-  // The app is let go: b's step starts by itself, through a restart of its idle claude on the same conversation.
+  // You talk to b while it waits: the app is let go, but b is not cut off mid-reply; it starts when its turn ends.
+  await hook(b, 'UserPromptSubmit', { prompt: 'what did you find?' });
   await hook(a, 'Stop', done('app work'));
+  assert.equal((await getRun(b.id)).steps[1].status, 'pending', 'not while you talk to it');
+  assert.ok(!fs.existsSync(path.join(runsDir, b.id, 'restart.ok')));
+  assert.match((await orchText('next', b.id)).err, /it is working now/, 'nor orch next from outside');
+  // Its turn ends: b's step starts by itself, through a restart of its idle claude on the same conversation.
+  await hook(b, 'Stop', say('I found the cause.'));
   now = await waitFor(async () => { const r = await getRun(b.id); return r.steps[1].status === 'running' ? r : null; }, 'b to start its app step');
   assert.ok(fs.existsSync(path.join(runsDir, b.id, 'restart.ok')), 'the launcher restarts its claude');
   assert.equal(now.appNext, undefined);
@@ -2287,6 +2293,11 @@ test('one grammar: steps of a run and a template with the same verbs; start safe
   fs.rmSync(path.join(dataDir, 'templates', 'grammar-demo.json'));
 
   // Start: loose words are refused; a ticket with a run asks first; a draft starts with start <run>.
+  // A quoted job that looks like key=value is the job, not an option.
+  const { parse } = await import('../lib/cli/spec.mjs');
+  assert.deepEqual(parse(['start', 'x', 'VAT=0 rows break']).pos, ['x', 'VAT=0 rows break']);
+  assert.deepEqual(parse(['start', 'x', 'repos=api is broken']), { name: 'start', pos: ['x', 'repos=api is broken'], opt: {} });
+  assert.deepEqual(parse(['start', 'x', 'ITP2-1', 'repos=api', 'draft=yes']).opt, { repos: 'api', draft: true });
   assert.match((await orchText('start', 'demo-hello-recap', 'fix', 'the', 'bug')).err, /"fix the bug" is not a ticket key\. Quote a job in words: start demo-hello-recap "fix the bug"/);
   const { body: d } = await orch('start', 'demo-hello-recap', 'ITP2-4242', 'draft=yes');
   assert.equal(d.status, 'draft');
