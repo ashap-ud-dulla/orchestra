@@ -1,9 +1,14 @@
 #!/bin/sh
-# Orchestra: a push to main is always refused. Other pushes need ORCHESTRA_ALLOW_PUSH=1; a run's
-# terminal session sets it, because there Claude asks you before every push (the PreToolUse guard).
+# Orchestra: a push to main (or master, or with no pack the remote's default branch) is always refused. Other pushes
+# need ORCHESTRA_ALLOW_PUSH=1; a run's terminal session sets it, because there Claude asks you before every push
+# (the PreToolUse guard).
 . "$(dirname "$0")/_orchestra.sh"
 input=$(cat)
-if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exit !found }'; then
+to_main=
+for ref in $(printf '%s\n' "$input" | awk '{ print $3 }'); do
+  orchestra_is_main "${ref#refs/heads/}" && to_main=1
+done
+if [ -n "$to_main" ]; then
   # One exception: the Wrap up step pushes the vault and the ITP folder, which live on main.
   if orchestra_wrap_up && { orchestra_main_ok || orchestra_is_itp; }; then
     :

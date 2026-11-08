@@ -76,9 +76,18 @@ orchestra_norm() {
   printf '%s' "$1" | tr '\\' '/' | sed -e 's#^/\([a-zA-Z]\)/#\1:/#' -e 's#/*$##' | tr 'A-Z' 'a-z'
 }
 
+# A branch no run works on: main, master, and (ORCHESTRA_PROTECT_DEFAULT=1, a solution with no pack) the remote's
+# default branch.
+orchestra_is_main() {
+  case "$1" in main | master) return 0 ;; esac
+  [ "$ORCHESTRA_PROTECT_DEFAULT" = "1" ] || return 1
+  def=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
+  [ -n "$def" ] && [ "$1" = "${def#origin/}" ]
+}
+
 # Refuses work on main, except in the vault, and in the ITP folder while the Wrap up step works.
 orchestra_no_main() {
-  [ "$(orchestra_branch)" = "main" ] || return 0
+  orchestra_is_main "$(orchestra_branch)" || return 0
   orchestra_main_ok && return 0
   orchestra_wrap_up && orchestra_is_itp && return 0
   orchestra_refuse "work on the main branch is refused. Use the run's work branch."

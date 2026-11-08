@@ -75,6 +75,9 @@ export default {
   },
   wrapUpNote: 'The Wrap up step pushes the vault, closes the epic and pushes the ITP files, as you pick.',
 
+  // The git hooks refuse main and master; ITP repos' default branches are development branches, left as they were.
+  protectDefaultBranch: false,
+
   // The core's starter skills (orch-plan, orch-build, orch-review, orch-hello) are not installed: ITP has its own.
   starterSkills: false,
 

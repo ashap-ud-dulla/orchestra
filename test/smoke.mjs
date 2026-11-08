@@ -1769,6 +1769,93 @@ test('upgrade: a run and a template saved with the old words (boxes, waitAfter, 
   await close(run);
 });
 
+test('parts: the Windows Terminal command line (a ; in the job, the pane size) and the hook\'s answer when Orchestra is busy', async () => {
+  const { tabCommand, tabTitle } = await import('../lib/terminal.mjs');
+  const run = { id: 'run-1', hookToken: 't', templateName: 'T', input: { text: 'Fix the legend; then "ship" it' } };
+  assert.equal(tabTitle(run), 'Fix the legend then ship it', 'no ; (wt splits there) and no quotes in the title');
+  const cmd = tabCommand(run, 'C:/o/1', { pane: true, paneSize: 99 });
+  assert.deepEqual(cmd.filter((w) => w === ';').length, 2, 'only Orchestra\'s own separators');
+  assert.equal(cmd[cmd.indexOf('--size') + 1], '0.7', 'the pane is 70% at most');
+  assert.equal(tabCommand(run, 'C:/o/1', { pane: true, paneSize: 'x' })[cmd.indexOf('--size') + 1], '0.3');
+  assert.ok(!tabCommand(run, 'C:/o/1').includes(';'), 'no pane: one command');
+  // A hook that cannot get the lock never passes a tab word to Claude as talk.
+  const { failedOutput } = await import('../lib/hook-handler.mjs');
+  assert.match(failedOutput('UserPromptSubmit', { prompt: '/orch next' }, new Error('busy')).output.reason, /could not handle "\/orch next": busy/);
+  assert.equal(failedOutput('UserPromptSubmit', { prompt: 'hello' }, new Error('busy')).output.decision, undefined, 'talk still reaches Claude');
+  assert.deepEqual(failedOutput('PostToolUse', {}, new Error('busy')), {}, 'a lost activity line is quiet');
+});
+
+test('no pack: a one-repo project on master, a path with a space, a GitHub PR link, no app: setup, start, steps, wrap up', async () => {
+  const solo = path.join(tmp, 'solo app');
+  const origin = path.join(tmp, 'solo-origin.git');
+  const g = (args, cwd) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  fs.mkdirSync(solo, { recursive: true });
+  g(['init', '-q', '--bare', '-b', 'master', origin], tmp);
+  g(['init', '-q', '-b', 'master'], solo);
+  fs.writeFileSync(path.join(solo, 'README.md'), '# solo\n');
+  g(['add', '.'], solo);
+  g(['commit', '-qm', 'start'], solo);
+  g(['remote', 'add', 'origin', origin], solo);
+  g(['push', '-q', '-u', 'origin', 'master'], solo);
+  g(['remote', 'set-head', 'origin', 'master'], solo);
+  const home = path.join(tmp, 'solo-home');
+  fs.cpSync(path.join(ROOT, 'test/skills'), home, { recursive: true });
+  useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_ITP_ROOT: '', ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
+  try {
+    // Setup: the folder, no pack, the core starter.
+    const s = await orchText('setup', `solution=${solo}`, `worktrees=${path.join(tmp, 'solo-wt')}`);
+    assert.equal(s.code, 0, s.err + s.out);
+    assert.match(s.out, /Pack: none[^]*orch-plan: installed[^]*wrap-up: installed/);
+    assert.ok(fs.existsSync(path.join(tmp, 'solo-data', 'templates', 'plan-build-review.json')), 'the starter template');
+    useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_ITP_ROOT: solo, ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
+    // The folder is the repo: one repo, from origin/master.
+    const { body: repos } = await orch('repos');
+    assert.deepEqual(repos.map((r) => [r.token, r.defaultBase]), [['solo-app', 'origin/master']]);
+    assert.equal((await orchText('template', 'new', 'solo-flow', 'orchestra-hello', 'name=Solo', 'repos=solo-app')).code, 0);
+    assert.equal((await orchText('steps', 'solo-flow', 'add', 'wrap-up', 'label=Wrap up')).code, 0);
+    assert.match((await orchText('app')).err, /this solution has no app/);
+
+    const run = await startRun(null, { templateId: 'solo-flow', input: 'Add a greeting' });
+    const ws = run.workspace.dir;
+    const wt = path.join(ws, 'solo app');
+    assert.ok(fs.existsSync(path.join(wt, 'README.md')), 'its worktree, in a folder with a space');
+    assert.ok(!fs.existsSync(path.join(ws, 'README.md')), 'nothing of your checkout is linked in');
+    // No ITP in the session: rules, MCP servers, env.
+    const spec = (await launch(await getRun(run.id), fakeLauncher())).body;
+    const rules = spec.args[spec.args.indexOf('--append-system-prompt') + 1];
+    assert.doesNotMatch(rules, /ITPKV|Teamspace|ITP folder/);
+    assert.match(rules, /main, master, or the remote's default branch/);
+    const settings = JSON.parse(spec.args[spec.args.indexOf('--settings') + 1]);
+    assert.deepEqual([settings.enabledMcpjsonServers, settings.disabledMcpjsonServers], [[], []]);
+    assert.equal(spec.env.ORCHESTRA_PROTECT_DEFAULT, '1');
+    assert.equal(spec.env.ITP_REGISTRY_OFF, undefined);
+    // master is guarded: by the guard and by the git hooks.
+    assert.equal(check('Bash', { command: 'git push origin master' }, spec.env)?.needsApproval, false);
+    g(['switch', '-q', '-c', 'orch/greeting'], wt);
+    fs.writeFileSync(path.join(wt, 'hello.txt'), 'hi\n');
+    g(['add', '.'], wt);
+    g(['commit', '-qm', 'greeting'], wt);
+    const push = spawnSync('git', ['push', 'origin', 'HEAD:master'], { cwd: wt, encoding: 'utf8', env: { ...process.env, ...spec.env } });
+    assert.notEqual(push.status, 0);
+    assert.match(push.stderr, /a push to the main branch is refused/);
+    // A GitHub PR link is kept; the Wrap up step gets it, and no vault lines.
+    const out = await hook(run, 'Stop', done('built. Open the PR: https://github.com/me/solo/pull/new/orch/greeting'));
+    assert.deepEqual((await getRun(run.id)).ship.prUrls, ['https://github.com/me/solo/pull/new/orch/greeting']);
+    assert.match(out.body.output.reason, /\/wrap-up[^]*Pull requests: https:\/\/github\.com\/me\/solo\/pull\/new\/orch\/greeting/);
+    assert.doesNotMatch(out.body.output.reason, /ITPKV|vault/);
+    await hook(run, 'Stop', done('wrapped up'));
+    assert.equal((await getRun(run.id)).status, 'done');
+    await close(run);
+    assert.equal((await orchText('delete', run.id, 'force=yes')).code, 0);
+  } finally {
+    useEnv();
+  }
+});
+
 test('clean up: only when you say; it stops what runs from the folder, frees the space and the conversation; the run, branches and stats stay', async () => {
   useFakeItp();
   await api('PUT', '/api/settings', { maxRunning: 20 });

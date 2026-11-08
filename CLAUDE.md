@@ -58,5 +58,5 @@ Orchestra only touches ITP in three ways:
   helpers), `lib/limits.mjs` (timings and caps), `lib/model.mjs` (model and effort words).
 - `node test/smoke.mjs` runs the tests with a fake `claude` (no tokens spent); `node test/smoke.mjs <words>` runs
   only the tests whose name has one of the words.
-- Plans: `~/.claude/plans/you-know-my-workflow-floofy-lemon.md` (the 8 build steps),
-  `~/.claude/plans/joyful-doodling-allen.md` (now: the "Test in the app" step and the app queue).
+- Plans: `~/.claude/plans/orchestra-rebuild.md` (the 9-phase rebuild, done 2026-11-08: safety, split files, state v2,
+  speed, app queue, /orch, core + packs, generic setup, docs). Older: `you-know-my-workflow-floofy-lemon.md` (the build).
