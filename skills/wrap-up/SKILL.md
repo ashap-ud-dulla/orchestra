@@ -72,7 +72,7 @@ If a run worktree has uncommitted files: show them and ask **Keep them (no clean
 Ask "Clean up this run when you close the tab?":
 - **Yes, clean**: the run's folder, its processes, git's records, merged branches and the conversation files go
   when the tab closes. Branches with work, notes and stats stay.
-- **Keep the folder**: nothing is removed. It can be cleaned later from `/orchestra`.
+- **Keep the folder**: nothing is removed. It can be cleaned later from `/orch`.
 - **Not yet**: the user comes back later.
 
 ## 6. End

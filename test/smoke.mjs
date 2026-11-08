@@ -430,8 +430,8 @@ test('models: a step with another model or effort restarts claude on the same co
   assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'model-demo')).code, 0);
   assert.equal((await orchText('template', 'set', 'model-demo', 'model=opus', 'effort=high')).code, 0);
   assert.equal((await orchText('template', 'step', 'model-demo', 'recap', 'model=sonnet')).code, 0);
-  assert.match((await orchText('template', 'step', 'model-demo', 'recap', 'model=GPT 4!')).err, /model must be opus, sonnet/);
-  assert.match((await orchText('template', 'step', 'model-demo', 'recap', 'effort=huge')).err, /effort must be low, medium/);
+  assert.match((await orchText("template", "step", "model-demo", "recap", "model=GPT 4!")).err, /"gpt 4!" is not a model or effort/);
+  assert.match((await orchText('template', 'step', 'model-demo', 'recap', 'effort=huge')).err, /"huge" is not a model or effort. Did you mean high/);
   assert.match((await orchText('template', 'step', 'model-demo', 'hello', 'effort=ultracode')).out, /hello[^\n]*ultracode \(many helpers, costly\)/);
   const shown = (await orchText('template', 'step', 'model-demo', 'hello', 'effort=none')).out;
   assert.match(shown, /default opus, effort high/);
@@ -515,9 +515,15 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   ]);
   await launch(run, fakeLauncher());
   const say = async (prompt) => (await hook(run, 'UserPromptSubmit', { prompt })).body.output;
-  // Plain talk stays talk; a line for the /orchestra skill (a ticket key in it) reaches the skill.
+  // Plain talk stays talk; /orch in the tab is always Orchestra's: a wrong word gets one line, never the skill.
   assert.equal((await say('model opus'))?.decision, undefined);
-  assert.equal((await say('/orchestra model ITP2-1 opus'))?.decision, undefined);
+  assert.match((await say('/orchestra model ITP2-1 opus')).reason, /"itp2-1" is not a model or effort/);
+  assert.match((await say('/orch model opsu')).reason, /Did you mean opus\?/);
+  assert.match((await say('/orch effort hihg')).reason, /Did you mean high\?/);
+  assert.match((await say('/orch frobnicate')).reason, /"\/orch frobnicate" is not a tab command\. .*In this tab: next/);
+  assert.match((await say('/orch help')).reason, /next   go on with "Say hello"/);
+  assert.match((await say('/orch steps')).reason, /1\. Say hello/);
+  assert.match((await say('/orch runs')).reason, /^Orchestra:\nRun\s+About\s+Status/);
   assert.equal((await say('/orchestra effort'))?.decision, 'block', '"effort" alone shows');
   assert.match((await say('/orchestra model')).reason, /"Say hello" already runs with sonnet, effort high/);
   // Switch the working step: block (the old claude stops), same conversation, a "go on" prompt, not the step again.
@@ -543,9 +549,9 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   // orch model changes the run only; the step working now switches when "/orchestra model" is typed in the tab.
   const cli = await orchText('model', run.id, 'sonnet', 'high');
   assert.equal(cli.code, 0);
-  assert.match(cli.out, /"Say hello" \(working now\) runs with sonnet, effort high\.\nType "\/orchestra model" in its tab to switch now/);
+  assert.match(cli.out, /"Say hello" \(working now\) runs with sonnet, effort high\.\nType "\/orch model" in its tab to switch now/);
   assert.equal((await getRun(run.id)).restart, null, 'never a restart from outside');
-  assert.match((await orchText('model', run.id, 'gpt 4!')).err, /not a model or effort: gpt 4!/);
+  assert.match((await orchText('model', run.id, 'gpt 4!')).err, /"gpt 4!" is not a model or effort/);
   assert.match((await say('/orchestra model')).reason, /restarts this tab with sonnet, effort high/);
   await runnerCall('relaunchSpec', [run.id, run.hookToken, (await getRun(run.id)).session.pid]);
   // Waiting after the step: the next step changes, with no restart; it starts with it on next.
@@ -1252,34 +1258,39 @@ test('setup: a fresh clone learns the ITP folder, gets the starter templates and
   const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '' } });
   const none = await fresh('status');
   assert.notEqual(none.code, 0);
-  assert.match(none.err, /does not know your ITP folder yet\. Run: node .*bin\/orch\.mjs setup --itp/);
+  assert.match(none.err, /does not know your ITP folder yet\. Run: node .*bin\/orch\.mjs setup itp=/);
   assert.match((await fresh('setup', '--itp', tmp)).err, /has no \.claude\/skills folder/);
-  const s = await fresh('setup', '--itp', testItp, '--email', 'dev@example.com');
+  // The menu skill before it was /orch, installed by an older setup: removed (no run tab is open).
+  fs.mkdirSync(path.join(home, 'orchestra'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), '{}');
+  const s = await fresh('setup', 'itp=' + testItp, 'email=dev@example.com');
   assert.equal(s.code, 0, s.err + s.out);
+  assert.match(s.out, /orchestra: old name, removed/);
+  assert.ok(!fs.existsSync(path.join(home, 'orchestra')));
   assert.match(s.out, /ITP folder: .*itp-base/);
   assert.match(s.out, /dev@example\.com/);
   assert.ok(fs.existsSync(path.join(data, 'templates', 'feature-template.json')), 'starter templates copied');
-  const skill = fs.readFileSync(path.join(home, 'orchestra', 'SKILL.md'), 'utf8');
+  const skill = fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8');
   assert.ok(!skill.includes('{{'), 'placeholders filled');
   assert.ok(skill.includes(`node ${ROOT.replace(/\\/g, '/')}/bin/orch.mjs`), 'names this clone');
   assert.ok(fs.existsSync(path.join(home, 'app-test', 'SKILL.md')));
   // Now it works, and a second setup changes nothing of yours.
   assert.equal((await fresh('status')).code, 0);
   fs.writeFileSync(path.join(data, 'templates', 'feature-template.json'), '{"mine": true}');
-  fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit\n');
+  fs.appendFileSync(path.join(home, 'orch', 'SKILL.md'), '\nmy edit\n');
   const again = await fresh('setup');
-  assert.match(again.out, /orchestra: updated \(your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d\)/);
+  assert.match(again.out, /orch: updated \(your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d\)/);
   assert.match(again.out, /app-test: up to date/);
   assert.equal(fs.readFileSync(path.join(data, 'templates', 'feature-template.json'), 'utf8'), '{"mine": true}', 'your template is kept');
   // A second hand edit the same day gets its own backup, never over the first.
-  fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit 2\n');
+  fs.appendFileSync(path.join(home, 'orch', 'SKILL.md'), '\nmy edit 2\n');
   assert.match((await fresh('setup')).out, /your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d-2\)/);
   // A copy setup installed itself (a pull changed the repo's text) is just replaced: no backup.
-  const notes = JSON.parse(fs.readFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), 'utf8'));
-  fs.writeFileSync(path.join(home, 'orchestra', 'SKILL.md'), 'older text from setup\n');
+  const notes = JSON.parse(fs.readFileSync(path.join(home, 'orch', '.orchestra-installed.json'), 'utf8'));
+  fs.writeFileSync(path.join(home, 'orch', 'SKILL.md'), 'older text from setup\n');
   notes['SKILL.md'] = (await import('node:crypto')).createHash('sha256').update('older text from setup\n').digest('hex');
-  fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), JSON.stringify(notes));
-  assert.match((await fresh('setup')).out, /orchestra: updated\n/);
+  fs.writeFileSync(path.join(home, 'orch', '.orchestra-installed.json'), JSON.stringify(notes));
+  assert.match((await fresh('setup')).out, /orch: updated\n/);
 });
 
 test('a "wait for me" step stops the run; next goes on; you are notified', async () => {
@@ -2100,16 +2111,16 @@ test('learn: after a run you talked to, lessons are suggested; an accepted rule 
   assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'accept', text: 'Use blue for all buttons.' })).status, 200);
   assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'reject' })).status, 409, 'decided once');
   assert.deepEqual(flow.change, { op: 'step', step: 'hello', wait: 'on' });
-  assert.match((await orchText('suggestions')).out, /change: template step demo-hello-recap hello wait=on/);
+  assert.match((await orchText('suggestions')).out, /change: steps demo-hello-recap set hello wait=on/);
   // Accepted without --apply: only marked, and listed as not in the template yet.
-  assert.match((await orchText('suggestion', flow.id, 'accept')).out, /Not in the template yet[^]*template step demo-hello-recap hello wait=on[^]*suggestion \S+ apply/);
+  assert.match((await orchText('suggestion', flow.id, 'accept')).out, /Not in the template yet[^]*steps demo-hello-recap set hello wait=on[^]*suggestion \S+ apply/);
   assert.equal((await api('GET', '/api/templates/demo-hello-recap')).body.steps[0].wait, false, 'accept alone changes nothing');
   assert.match((await orchText('suggestions')).out, new RegExp(`Accepted, not in the template yet[^]*${flow.id}`));
   assert.equal((await api('POST', `/api/suggestions/${flow.id}`, { action: 'maybe' })).status, 400);
   // Apply: to a template that is gone, a hint; to the named one (a copy, so other tests keep the demo as is), the change.
   const gone = await orchText('suggestion', flow.id, 'apply', '--template', 'nope');
   assert.notEqual(gone.code, 0);
-  assert.match(gone.err + gone.out, /not there any more[^]*--template/);
+  assert.match(gone.err + gone.out, /not there any more[^]*template=<id>/);
   assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'lesson-copy')).code, 0);
   assert.match((await orchText('suggestion', flow.id, 'apply', '--template', 'lesson-copy')).out, /accepted and applied[^]*Step hello changed/);
   assert.equal((await api('GET', '/api/templates/lesson-copy')).body.steps[0].wait, true);
@@ -2154,7 +2165,51 @@ test('orch: broken template files are skipped; bad input is refused', async () =
   assert.equal((await api('PUT', '/api/settings', { learn: 'maybe' })).status, 400);
   const unknown = await orchText('fly');
   assert.notEqual(unknown.code, 0);
-  assert.match(unknown.err, /unknown command: fly[^]*Orchestra commands/);
+  assert.match(unknown.err, /unknown command: fly\. All commands: help/);
+  assert.match((await orchText('templats')).err, /Did you mean templates\?/);
+  assert.match((await orchText('runs', 'colour=red')).err, /runs has no option "colour"\. Its options: all/);
+  assert.match((await orchText('settings', 'mx=3')).err, /settings has no option "mx"\. Did you mean max\?/);
+  assert.match((await orchText('runs', '--fancy')).err, /runs has no option "fancy"/);
+});
+
+test('one grammar: steps of a run and a template with the same verbs; start safety; next from outside', async () => {
+  // A template's steps, with no JSON.
+  assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'grammar-demo')).code, 0);
+  let out = await orchText('steps', 'grammar-demo', 'add', 'orchestra-recap', 'after=hello', 'label=Check it', 'wait=on', 'model=sonnet');
+  assert.equal(out.code, 0, out.err);
+  assert.match(out.out, /Added orchestra-recap as step 2[^]*2\. Check it \[check-it\] \/orchestra-recap · wait after, sonnet/);
+  assert.match((await orchText('steps', 'grammar-demo', 'set', 'check-it', 'effort=hgih')).err, /Did you mean high\?/);
+  assert.match((await orchText('steps', 'grammar-demo', 'add', 'orchestra-hello', 'at=abc')).err, /at must be a number from 1 to 4/);
+  assert.match((await orchText('steps', 'grammar-demo', 'mvoe', 'x')).err, /steps has no "mvoe"\. Did you mean move\?/);
+  assert.equal((await orchText('steps', 'grammar-demo', 'move', 'check-it', 'to=1')).code, 0);
+  assert.equal((await orchText('steps', 'grammar-demo', 'remove', '2')).code, 0);
+  assert.deepEqual((await orch('template', 'show', 'grammar-demo')).body.steps.map((s) => s.id), ['check-it', 'recap']);
+  fs.rmSync(path.join(dataDir, 'templates', 'grammar-demo.json'));
+
+  // Start: loose words are refused; a ticket with a run asks first; a draft starts with start <run>.
+  assert.match((await orchText('start', 'demo-hello-recap', 'fix', 'the', 'bug')).err, /"fix the bug" is not a ticket key\. Quote a job in words: start demo-hello-recap "fix the bug"/);
+  const { body: d } = await orch('start', 'demo-hello-recap', 'ITP2-4242', 'draft=yes');
+  assert.equal(d.status, 'draft');
+  assert.match((await orchText('start', 'demo-hello-recap', 'ITP2-4242')).err, /ITP2-4242 has a run already \(draft\)[^]*again=yes/);
+  // A run's steps, the same verbs (only this run changes).
+  out = await orchText('steps', 'ITP2-4242', 'set', 'hello', 'wait=on');
+  assert.match(out.out, /Step hello changed\. \(this run only; its template stays\)[^]*1\. Say hello \(\/orchestra-hello\) · pending · wait after/);
+  assert.match((await orchText('start', 'ITP2-4242')).out, /ITP2-4242 started/);
+  const run = await waitFor(async () => { const r = await getRun(d.id); return r.session?.open ? r : null; }, 'the draft to open its tab');
+  await hook(run, 'SessionStart', { session_id: run.sessionId, source: 'startup' });
+  assert.match((await orchText('run', 'ITP2-4242')).out, /working[^]*Steps:[^]*More \(what each step did, PR links, activity\): run ITP2-4242 full=yes/);
+  assert.match((await orchText('next', 'ITP2-4242')).err, /it is working now/);
+  // next from outside, at a gate: like typing it in the tab; its claude restarts to get it.
+  await hook(run, 'Stop', done('hello'));
+  let now = await getRun(run.id);
+  assert.equal(now.status, 'waiting');
+  out = await orchText('next', 'ITP2-4242');
+  assert.equal(out.code, 0, out.err);
+  now = await getRun(run.id);
+  assert.ok(now.restart && fs.existsSync(path.join(runsDir, run.id, 'restart.ok')), 'its claude restarts');
+  assert.match(now.launchPrompt, /The user typed next \(from outside this tab\)\. [^]*\/orchestra-recap/);
+  await close(run);
+  assert.equal((await orchText('delete', 'ITP2-4242')).code, 0);
 });
 
 test('orch: a template is built step by step, as Claude does it when you talk', async () => {
@@ -2190,7 +2245,7 @@ test('orch: runs are found by Jira key; status, board and run read plainly', asy
   assert.match(status.out, /! ITP2-31337: needs you in its tab: Which repo should I use\?/);
   const board = await orchText('runs');
   assert.match(board.out.split('\n')[0], /^Run\s+About\s+Status\s+Step\s+Cost/);
-  assert.match(board.out, /ITP2-31337\s+needs-you\s+1\/2 Say hello/);
+  assert.match(board.out, /ITP2-31337\s+asks you\s+1\/2 Say hello/);
   const detail = await orchText('run', 'itp2-31337');
   assert.match(detail.out, /^ITP2-31337 · Demo/);
   assert.match(detail.out, /1\. Say hello \(\/orchestra-hello\) · running/);

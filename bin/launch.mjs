@@ -89,14 +89,7 @@ setInterval(beat, 10000).unref();
 
 if (spec) {
   console.log(`Orchestra run ${runId} · ${spec.title}`);
-  console.log([
-    'Type in this tab (or just talk to Claude):',
-    '  next          go on (after a step that waits for you, or with a step that was cut off)',
-    '  redo / skip   run this step again / move past it',
-    '  pin           keep Claude\'s last answer in the pane on the right',
-    '  /orchestra model opus effort high · /orchestra back <step> <why>',
-    '',
-  ].join('\n'));
+  console.log('Talk to Claude here. next goes on, redo / skip run the step again / move past it, pin keeps an answer in the pane. /orch help shows the rest.\n');
   start(spec);
   // Closing the tab ends this process; pass it on so claude ends too.
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, () => {});
