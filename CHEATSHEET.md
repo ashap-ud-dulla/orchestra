@@ -15,7 +15,8 @@ Everything: `/orch help`.
 | Want | Type |
 |---|---|
 | Status + menu | `/orch` |
-| Start tickets | `/orch start feature-template ITP2-15001 ITP2-15002` |
+| Start tickets or work orders | `/orch start feature-template ITP2-15001 TSP-W-001` |
+| Pick from what you hold | `/orch start feature-template` (no key): the run's first step lists your work orders and tickets |
 | Start a client bug | `/orch start bug-template ITP2-15003` (it searches the logs itself) |
 | Start a job with no ticket | `/orch start feature-template "Add a Sweden row"` (quoted) |
 | A ticket that has a run already | add `again=yes` |
@@ -52,6 +53,7 @@ Three runs work at once (`/orch settings max=2` to change). The rest wait in lin
 | `unpin` · `unpin 2` · `unpin all` | Remove pins |
 | `/orch help` | What you can type now |
 | `/orch steps` · `/orch runs` | Show them, without asking Claude (free) |
+| Plain words ("go back to build", "hand this to Samiul") | Claude says what will happen, asks yes/no for big moves, then Orchestra does it |
 | anything else | Normal chat with that run's Claude |
 
 **Right pane:** steps on top, pins below. Claude pins test steps by itself. Click the pane, then

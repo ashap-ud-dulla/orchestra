@@ -20,7 +20,9 @@ If the opensearch tools are missing or every cluster says it has no login: say s
 
 ## 1. The bug card
 
-Read the ticket (Jira, read only; for a run started from a job text, that text). Pull out:
+Read the task: `.orchestra/task.md` when the run's first step (Pick the task) wrote it (the ticket or Work Order, its
+comments and attachments, already read); else the ticket (Jira, read only; for a run started from a job text, that
+text). Pull out:
 
 | Field | Notes |
 |---|---|

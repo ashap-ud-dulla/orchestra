@@ -638,6 +638,48 @@ test('go forward: jump to Wrap up for a handover; the steps between are skipped,
   fs.rmSync(path.join(dataDir, 'templates', 'go-demo.json'));
 });
 
+test('intake: a run started with nothing takes the key its first step picks (a work order); plain words in the tab move the run', async () => {
+  // Start with nothing: one run, no task yet; its first step gets no words.
+  const { body: d } = await orch('start', 'demo-hello-recap', 'draft=yes');
+  assert.equal(d.input.text, '');
+  assert.equal((await orchText('steps', d.id, 'set', 'hello', 'wait=on')).code, 0);
+  assert.equal((await orchText('steps', d.id, 'add', 'orchestra-hello', 'label=Build')).code, 0);
+  assert.equal((await orchText('start', d.id)).code, 0);
+  const run = await waitFor(async () => { const r = await getRun(d.id); return r.session?.open ? r : null; }, 'the empty run to open');
+  await hook(run, 'SessionStart', { session_id: run.sessionId, source: 'startup' });
+  const spec = (await launch(await getRun(run.id), fakeLauncher())).body;
+  assert.equal(spec.args.at(-1), '/orchestra-hello', 'the first step gets no task words');
+  assert.match(spec.args[spec.args.indexOf('--append-system-prompt') + 1], /\.orchestra\/task\.md[^]*ORCHESTRA:DO <command>/);
+  // The first step picks a work order: the run takes its key.
+  await hook(run, 'Stop', done('picked it\nORCHESTRA:TASK TSP-W-001 | Export dashboards to a file'));
+  let now = await getRun(run.id);
+  assert.deepEqual(now.task && [now.task.key, now.task.title], ['TSP-W-001', 'Export dashboards to a file']);
+  assert.equal((await orch('run', 'TSP-W-001')).body.id, run.id, 'found by the work order key');
+  assert.match((await orchText('runs')).out, /TSP-W-001\s+Export dashboards/);
+  assert.equal((await orchText('start', 'demo-hello-recap', 'TSP-W-002', 'draft=yes')).code, 0, 'a work order key is a key');
+  // Plain words, passed on by Claude: a small one (pin) just happens.
+  await hook(run, 'UserPromptSubmit', { prompt: 'keep that in the pane' });
+  let out = (await hook(run, 'Stop', say('Here are the steps.\nORCHESTRA:DO pin'))).body.output;
+  assert.match(out.systemMessage, /Orchestra pinned/);
+  // An unknown one: the usage, shown to you.
+  out = (await hook(run, 'Stop', say('Ok.\nORCHESTRA:DO frobnicate'))).body.output;
+  assert.match(out.systemMessage, /is not a tab command/);
+  // next, asked in words: Claude gets the next step as a new turn.
+  out = (await hook(run, 'Stop', say('Going on.\nORCHESTRA:DO next'))).body.output;
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /\/orchestra-recap/);
+  // A big move after the user's yes: go forward, the step between is skipped, a restart starts it.
+  out = (await hook(run, 'Stop', say('Ok, skipping to Build.\nORCHESTRA:DO go build handing over'))).body;
+  assert.deepEqual(out, {});
+  now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.status), ['done', 'skipped', 'running']);
+  assert.ok(now.restart);
+  await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
+  await hook(run, 'Stop', done('built\nORCHESTRA:DO go 1'));
+  assert.deepEqual((await getRun(run.id)).steps.map((s) => s.status), ['done', 'skipped', 'done'], 'a DO that came with DONE is ignored');
+  await close(run);
+});
+
 test('go from outside: a working run is refused; a waiting one starts at once; a step working now is skipped when you jump', async () => {
   const run = await startRun([{ id: 'a', skill: 'orchestra-hello', wait: true }, { id: 'b', skill: 'orchestra-recap' }, { id: 'c', skill: 'orchestra-hello' }]);
   await launch(run, fakeLauncher());

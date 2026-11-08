@@ -8,18 +8,11 @@
 - `orch settings launcher=apphost|runstack` = how the "Test in the app" step starts the ITP app: the Aspire AppHost
   (default: every host, Mission consumer and Scheduler too) or run-stack.ps1 (old branches with no AppHost).
 
-## Your open Jira tickets (for Start run(s))
+## Picking the task
 
-Read only: never change a ticket from here.
-1. `searchJiraIssuesUsingJql` with cloudId `orbitax.atlassian.net`, jql
-   `assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`, maxResults 50, fields
-   `summary,status,issuetype`, responseContentFormat `markdown`. (If the cloudId is refused, get it once with
-   `getAccessibleAtlassianResources`.)
-2. Run `orch runs all --json` and mark the tickets that already have a run (their tab name is the key).
-3. Show a short table of the 10 most recently updated: key, title, status, "has a run". Then ask with
-   AskUserQuestion (multiSelect): the 4 newest tickets without a run as options; the user types other keys, or a
-   job in words, in "Other".
-5. No Jira connection, or the call fails: say so in one line, and ask for the keys or jobs as text.
+The first step of the ITP templates, **Pick the task** (`intake`), reads a Work Order (Teamspace, read only), a Jira
+ticket or a job in words, and with nothing given lists the Work Orders the user holds and their open Jira tickets in
+the run's tab. So from here: never call Teamspace, and do not list tickets: start the run (empty when none was named).
 
 ## ITP templates and steps
 

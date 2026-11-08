@@ -1,4 +1,5 @@
 {
   "wrap-up": "clean",
-  "bug-logs": "clean"
+  "bug-logs": "clean",
+  "intake": "clean"
 }

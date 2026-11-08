@@ -3,9 +3,44 @@
   "id": "plan-build-review",
   "name": "Plan, build, review",
   "steps": [
-    { "id": "plan", "skill": "orch-plan", "label": "Plan", "wait": false, "model": "opus" },
-    { "id": "build", "skill": "orch-build", "label": "Build", "wait": false, "fresh": true, "model": "sonnet" },
-    { "id": "review", "skill": "orch-review", "label": "Review", "wait": true, "model": "opus" },
-    { "id": "wrap-up", "skill": "wrap-up", "label": "Wrap up", "fresh": true, "model": "sonnet" }
+    {
+      "id": "intake",
+      "skill": "intake",
+      "label": "Pick the task",
+      "wait": false,
+      "app": false,
+      "explain": false,
+      "model": "sonnet",
+      "effort": "medium"
+    },
+    {
+      "id": "plan",
+      "skill": "orch-plan",
+      "label": "Plan",
+      "wait": false,
+      "model": "opus"
+    },
+    {
+      "id": "build",
+      "skill": "orch-build",
+      "label": "Build",
+      "wait": false,
+      "fresh": true,
+      "model": "sonnet"
+    },
+    {
+      "id": "review",
+      "skill": "orch-review",
+      "label": "Review",
+      "wait": true,
+      "model": "opus"
+    },
+    {
+      "id": "wrap-up",
+      "skill": "wrap-up",
+      "label": "Wrap up",
+      "fresh": true,
+      "model": "sonnet"
+    }
   ]
 }

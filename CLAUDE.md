@@ -43,6 +43,11 @@ Orchestra only touches ITP in three ways:
 - `go` (also back, jump): moves a run to any step on its own steps (no copies). Back resets that step and the ones
   after it to pending, keeping each one's earlier results in `step.tries`; forward marks the steps between `skipped`
   (status; `PASSED` = done or skipped in `lib/run/steps.mjs`) and tells the step (`jumpedOver`, `why`).
+- Intake: the first step of a run (`intake`; the ITP pack's reads Teamspace Work Orders, read only) picks the task
+  (Work Order, Jira, words; nothing given: lists what the user holds), writes `.orchestra/task.md` and ends with
+  `ORCHESTRA:TASK <KEY> | title` (`run.task`; `ticketKey` prefers it). `/orch` itself never calls Teamspace.
+- Plain words in a run tab: the run's Claude ends its reply with `ORCHESTRA:DO <command>` (what follows `/orch`);
+  the Stop hook runs it as if typed (`doAsked`).
 - App queue: a step that needs the app while another run has it never blocks a hook: the run waits (`appNext`), its
   tab stays free, its slot is freed, and once the app is free its idle claude is restarted on the same conversation
   with the step (`startAppWaiters`, via `restart.ok`). Notifications only for an Allow prompt, a question, a next

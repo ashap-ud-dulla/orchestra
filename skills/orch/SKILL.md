@@ -19,6 +19,9 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
 
 ## Rules
 
+- **Plain words are fine** everywhere: turn what the user says into the `orch` commands below ("hand ITP2-1 over to
+  Samiul" is `orch go ITP2-1 wrap-up handing over to Samiul`; "what is ITP2-1 doing" is `orch run ITP2-1`). In a run's
+  tab they can talk in plain words too: the run's Claude passes moves on to Orchestra.
 - Do all Orchestra work through `orch`. Never edit files under `orchestra/runs` or `orchestra/data` by hand, and never
   start `claude` yourself: `orch start` / `orch reopen` open the run tabs.
 - The runs do their own work in their own tabs.
@@ -88,8 +91,10 @@ Match what the user typed and skip the menu:
 ## Start run(s)
 
 1. **Template.** If they did not name one: run `orch templates` and ask which one (up to 4 as options).
-2. **Tickets or jobs.** If they gave none, offer their open tickets when the solution part below says how; else ask.
-   They can type keys, links, or a job in plain words. Each ticket or job makes one run.
+2. **Tickets or jobs.** They can give keys (a Jira key, a Work Order key like `TSP-W-001`), links, or a job in plain
+   words; each makes one run. **None given** ("start my next work order", "pick a task"): start ONE run with no task
+   (`orch start <template>`): its first step, **Pick the task** (`intake`), shows in its tab the Work Orders and
+   tickets the user holds and they pick there. Do not list tickets here.
    - A job with no ticket: quote it, one quoted text per run: `orch start <template> "Add a Sweden row" "Fix the legend"`
      (or `text="the job"` for one). Its tab is named after its first words; find it later by words (`orch run sweden`).
    - A text that only mentions a ticket ("same fix as ITP2-1, but for Sweden") is a job, not that ticket.
@@ -98,8 +103,6 @@ Match what the user typed and skip the menu:
    - **Start**: `orch start <template> <ticket> <ticket> …` (add `repos=…` or `base=repo=branch` only if they asked). A ticket that has a run already is refused: ask, then add `again=yes`.
    - **Change the steps first**: `orch start … draft=yes`, then edit with `orch steps <run> add|set|remove|move …` (below)
      (keep finished steps first), then `orch start <run>` to start it.
-4. Tickets picked from a ticket list: set each run's About line from its title right away:
-   `orch about <key> "<title>"`.
 5. Show the result. Tell them the tabs open in the "orchestra" window, and how many work at once (the rest wait).
 
 ## My runs
