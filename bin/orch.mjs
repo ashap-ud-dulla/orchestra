@@ -1,9 +1,11 @@
 // Orchestra's command line: node bin/orch.mjs <command> [args] [--json]
 // The /orchestra skill calls this; you can too. Plain text by default, --json for programs.
 // Every command takes the Orchestra lock for a moment and lets go (see lib/lock.mjs).
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { withRunner } from '../lib/runner.mjs';
+import { TICK_MARK } from '../lib/run/session.mjs';
 import { setup } from '../lib/setup.mjs';
 import { config } from '../lib/config.mjs';
 import { HELP } from '../lib/cli/help.mjs';
@@ -17,6 +19,9 @@ import { moreCommands } from '../lib/cli/more.mjs';
 // Every command: one object per group (lib/cli/).
 const commands = { ...runCommands, ...templateCommands, ...lessonCommands, ...moreCommands };
 commands.boxes = commands.steps; // the old name
+
+// Commands that answer at once: they show things, or (start) hand the slow work to other processes.
+const QUICK = new Set(['status', 'runs', 'run', 'timeline', 'disk', 'stats', 'templates', 'skills', 'repos', 'suggestions', 'rules', 'help', 'start']);
 
 // ---------- main ----------
 
@@ -47,7 +52,9 @@ try {
   if (!config.itpRoot && name !== 'help') {
     fail(`Orchestra does not know your ITP folder yet. Run: node ${path.join(config.root, 'bin', 'orch.mjs').replace(/\\/g, '/')} setup --itp <your ITP folder>`);
   }
-  const out = await withRunner((r) => cmd(r, { pos, opt }), { archived: true });
+  if (name === 'tick') fs.rmSync(path.join(config.runsDir, TICK_MARK), { force: true }); // see spawnTick
+  // Commands that only show things never do slow work themselves (start runs, clean up): other processes do.
+  const out = await withRunner((r) => cmd(r, { pos, opt }), { archived: true, detach: QUICK.has(name) });
   process.stdout.write((json ? JSON.stringify(out.json, null, 1) : out.text) + '\n');
   process.exit(0);
 } catch (err) {

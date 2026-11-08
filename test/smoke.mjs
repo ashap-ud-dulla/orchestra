@@ -2156,7 +2156,7 @@ test('orch: runs are found by Jira key; status, board and run read plainly', asy
   assert.match(detail.out, /1\. Say hello \(\/orchestra-hello\) · running/);
   assert.equal((await orch('run', run.id.slice(-6))).body.id, run.id, 'the end of the id works too');
   await close(run);
-  assert.ok(['queued', 'needs-you'].includes((await orch('reopen', 'ITP2-31337')).body.status), 'reopened (it may have started already)');
+  assert.ok(['queued', 'running', 'needs-you'].includes((await orch('reopen', 'ITP2-31337')).body.status), 'reopened (its tab may be opening already)');
   await waitFor(async () => (await getRun(run.id)).session?.open, 'the reopened tab');
   await close(await getRun(run.id));
   const all = await orch('reopen', 'all');

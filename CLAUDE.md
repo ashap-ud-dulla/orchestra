@@ -27,7 +27,11 @@ Orchestra only touches ITP in three ways:
 - State is plain files (`data/`, `runs/<id>/state.json`), shared by many short processes under one lock
   (`lib/lock.mjs`). Files say "step" (version 2); older files ("box", `orchestra-*` skill names) are upgraded when read
   (`lib/upgrade.mjs`). Chat and Claude's last replies sit next to the run file (`chat.jsonl`, `replies.json`). A
-  cleaned run moves to `runs/archive/<id>` (`runDir` finds it there; hooks never load the archive). Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
+  cleaned run moves to `runs/archive/<id>` (`runDir` finds it there; hooks never load the archive).
+- Speed: the tool-call and status-line hooks are answered from the run file with no lock (`lib/hook-fast.mjs`) unless
+  the run must change. Commands that only show things (and `start`) never do slow work: queued runs start in their own
+  process each (`orch tick <id>`, the run's "starter"), so workspaces build side by side. A hook starts at most one
+  pending `orch tick` (`runs/.tick-pending`). Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
 - Clean-up happens only when the user says so: it stops what runs from the run folder, removes the folder, prunes
   git's worktree records and removes the run's Claude conversation files. Branches, notes and stats stay.
   The usual way is the last template step `wrap-up` (personal skill), in the run's own tab: the user picks

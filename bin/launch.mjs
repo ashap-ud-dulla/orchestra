@@ -38,7 +38,7 @@ function start(spec) {
     if (restarting || !fs.existsSync(flag)) return;
     restarting = true;
     setTimeout(() => killTree(child.pid), RESTART_GRACE_MS);
-  }, 1000);
+  }, 250); // a quick look (one file check), so a model switch starts without dead time
   child.on('error', async (err) => {
     clearInterval(watch);
     // Tell Orchestra first, so the run says "failed: claude could not start" instead of "running".
