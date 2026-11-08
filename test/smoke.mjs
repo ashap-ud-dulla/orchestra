@@ -1199,6 +1199,25 @@ test('app: stop knows the AppHost\'s app as its own, though Aspire\'s DCP holds 
   }
 });
 
+test('app: your hold ends by itself once your app is gone', async () => {
+  const yours = path.join(dataDir, 'app-you.json');
+  const served = path.join(dataDir, 'app.json');
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e9)'], { stdio: 'ignore' });
+  try {
+    fs.writeFileSync(yours, JSON.stringify({ at: new Date(Date.now() - 3600000).toISOString() }));
+    fs.writeFileSync(served, JSON.stringify({ runId: 'you', title: 'you (your checkout)', workspace: tmp, pids: [sleeper.pid], startedAt: new Date().toISOString() }));
+    assert.equal((await orch('app')).body.holder?.id, 'you', 'your app runs: you hold it');
+    sleeper.kill();
+    await waitFor(() => sleeper.exitCode !== null || sleeper.signalCode !== null, 'the app to end');
+    assert.equal((await orch('app')).body.holder, null, 'your app is gone: the hold ends');
+    assert.ok(!fs.existsSync(yours));
+  } finally {
+    sleeper.kill();
+    fs.rmSync(yours, { force: true });
+    fs.rmSync(served, { force: true });
+  }
+});
+
 test('app: stop leaves an editor that has the folder open alone (only the app\'s own processes)', async () => {
   const { hostsIn } = await import('../lib/app.mjs');
   const ws = path.join(tmp, 'ws-editor');
@@ -1281,6 +1300,20 @@ test('a "wait for me" step stops the run; next goes on; you are notified', async
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-recap/);
   now = await getRun(run.id);
   assert.deepEqual([now.status, now.steps[1].status], ['running', 'running']);
+  // Notifications only when you are needed: a plain reply no, a question yes, an Allow prompt yes, idle no.
+  const toasts = async () => (await logs(run)).filter((t) => t.startsWith('notification')).length;
+  const before = await toasts();
+  await hook(run, 'Stop', say('I looked at the files. Going on.'));
+  assert.equal(await toasts(), before, 'a plain reply: no notification');
+  await hook(run, 'UserPromptSubmit', { prompt: 'ok' });
+  await hook(run, 'Stop', say('Which repo should I use?\n\n1. api\n2. webclient'));
+  assert.equal(await toasts(), before + 1, 'a question: one');
+  await hook(run, 'UserPromptSubmit', { prompt: 'api' });
+  await hook(run, 'Notification', { message: 'Claude needs your permission to use Bash' });
+  assert.equal(await toasts(), before + 2, 'an Allow prompt: one');
+  await hook(run, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } });
+  await hook(run, 'Notification', { message: 'Claude is waiting for your input' });
+  assert.equal(await toasts(), before + 2, 'idle: none');
   await close(run);
 });
 
@@ -1527,18 +1560,25 @@ test('several Jira tickets at once: one run each, in order; each tab is named af
   }
 });
 
-test('app lock: a step that starts the app waits in the Stop hook until the app is free', async () => {
+test('app lock: a step that needs the app waits in line with its tab free, and starts by itself when the app is free', async () => {
   const a = await startRun([{ id: 'app', skill: 'orchestra-hello', app: true }]);
   const b = await startRun([{ id: 'hello', skill: 'orchestra-hello' }, { id: 'app', skill: 'orchestra-recap', app: true }]);
-  let answered = null;
-  const bStop = hook(b, 'Stop', done('hello')).then((r) => (answered = r));
-  await waitFor(async () => /Waiting for the app/.test((await getRun(b.id)).steps[1].note || ''), 'run b to wait for the app');
-  await sleep(300);
-  assert.equal(answered, null, 'the Stop hook is still waiting');
+  // The Stop hook answers at once: no frozen tab.
+  const answered = await hook(b, 'Stop', done('hello'));
+  assert.match(answered.body.output.systemMessage, /Waiting for the app: run .* has it\. "orchestra-recap" starts by itself/);
+  let now = await getRun(b.id);
+  assert.deepEqual([now.status, now.steps[1].status, now.appNext.step], ['waiting', 'pending', 'app']);
+  assert.match((await orchText('app')).out, /demo/, 'orch app lists it in line');
+  // next while the app is busy: it says why, and keeps its place.
+  assert.match(context(await hook(b, 'UserPromptSubmit', { prompt: 'next' })), /Waiting for the app/);
+  // The app is let go: b's step starts by itself, through a restart of its idle claude on the same conversation.
   await hook(a, 'Stop', done('app work'));
-  await bStop;
-  assert.match(answered.body.output.reason, /\/orchestra-recap/);
-  assert.equal((await getRun(b.id)).steps[1].status, 'running');
+  now = await waitFor(async () => { const r = await getRun(b.id); return r.steps[1].status === 'running' ? r : null; }, 'b to start its app step');
+  assert.ok(fs.existsSync(path.join(runsDir, b.id, 'restart.ok')), 'the launcher restarts its claude');
+  assert.equal(now.appNext, undefined);
+  const { body: spec } = await runnerCall('relaunchSpec', [b.id, b.hookToken, now.session.pid]);
+  assert.match(spec.args.at(-1), /The app is free now\. .*\/orchestra-recap/);
+  assert.equal(spec.args[spec.args.indexOf('--resume') + 1], b.sessionId, 'the same conversation');
 
   // A run whose first step needs the app stays in the queue while another run has it.
   const { body: c } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'c' }, start: false });

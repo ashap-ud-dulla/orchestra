@@ -31,7 +31,11 @@ Orchestra only touches ITP in three ways:
 - Speed: the tool-call and status-line hooks are answered from the run file with no lock (`lib/hook-fast.mjs`) unless
   the run must change. Commands that only show things (and `start`) never do slow work: queued runs start in their own
   process each (`orch tick <id>`, the run's "starter"), so workspaces build side by side. A hook starts at most one
-  pending `orch tick` (`runs/.tick-pending`). Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
+  pending `orch tick` (`runs/.tick-pending`).
+- App queue: a step that needs the app while another run has it never blocks a hook: the run waits (`appNext`), its
+  tab stays free, its slot is freed, and once the app is free its idle claude is restarted on the same conversation
+  with the step (`startAppWaiters`, via `restart.ok`). Notifications only for an Allow prompt, a question, a next
+  gate, a failure. Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
 - Clean-up happens only when the user says so: it stops what runs from the run folder, removes the folder, prunes
   git's worktree records and removes the run's Claude conversation files. Branches, notes and stats stay.
   The usual way is the last template step `wrap-up` (personal skill), in the run's own tab: the user picks
