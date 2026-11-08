@@ -123,7 +123,7 @@ async function api(method, url, body = {}) {
     const [, id, what, force] = x;
     const f = force ? ['--force'] : [];
     if (what === 'timeline') return orch('timeline', id);
-    if (what === 'boxes') return orch('boxes', id, '--set', JSON.stringify(body.boxes));
+    if (what === 'steps') return orch('steps', id, '--set', JSON.stringify(body.steps));
     if (what === 'stop') return orch('stop', id);
     if (what === 'resume') return orch('reopen', id);
     if (what === 'clean-up') return orch('clean', id, ...f);
@@ -156,6 +156,8 @@ async function waitFor(fn, what, ms = 15000) {
     await new Promise((r) => setTimeout(r, 100));
   }
 }
+// What was typed in a run's tab (lib/run/chat.mjs keeps it in chat.jsonl).
+const chatOf = (run) => { try { return fs.readFileSync(path.join(runsDir, run.id, 'chat.jsonl'), 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const getRun = async (id) => (await api('GET', `/api/runs/${id}`)).body;
 const waitStatus = (id, status, ms) => waitFor(async () => ((await getRun(id)).status === status ? getRun(id) : null), `run ${id} to be ${status}`, ms);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -168,15 +170,15 @@ async function hook(run, event, body = {}, token = run.hookToken) {
   return { status: 200, body: r.out.trim() ? { output: JSON.parse(r.out) } : {} };
 }
 const launch = (run, pid = '', token = run.hookToken) => runnerCall('launchSpec', [run.id, token, pid]);
-const done = (text) => ({ last_assistant_message: `${text}\n\nWHAT I DID AND WHY:\n- I did ${text}, because the box asked.\nORCHESTRA:DONE` });
+const done = (text) => ({ last_assistant_message: `${text}\n\nWHAT I DID AND WHY:\n- I did ${text}, because the step asked.\nORCHESTRA:DONE` });
 const say = (text) => ({ last_assistant_message: text });
 const context = (r) => r.body.output?.hookSpecificOutput?.additionalContext || '';
 const logs = async (run) => (await api('GET', `/api/runs/${run.id}/timeline`)).body.filter((e) => e.kind === 'log').map((e) => e.text);
 
-// Makes a run (with these boxes, if given), starts it, and waits for its terminal session.
-async function startRun(boxes, { input = 'demo', templateId = 'demo-hello-recap' } = {}) {
+// Makes a run (with these steps, if given), starts it, and waits for its terminal session.
+async function startRun(steps, { input = 'demo', templateId = 'demo-hello-recap' } = {}) {
   const { body: d } = await api('POST', '/api/runs', { templateId, input: { text: input }, start: false });
-  if (boxes) assert.equal((await api('PUT', `/api/runs/${d.id}/boxes`, { boxes })).status, 200);
+  if (steps) assert.equal((await api('PUT', `/api/runs/${d.id}/steps`, { steps })).status, 200);
   assert.equal((await api('POST', `/api/runs/${d.id}/resume`)).status, 200);
   const run = await waitFor(async () => {
     const r = await getRun(d.id);
@@ -378,13 +380,13 @@ test('skills list includes Orchestra test skills and team skills', async () => {
 
 // ---- the terminal session ----
 
-test('a run opens a terminal tab; its launcher gets the session, the hooks and the first box', async () => {
+test('a run opens a terminal tab; its launcher gets the session, the hooks and the first step', async () => {
   const run = await startRun(null, { input: 'Bappy' });
   const cmd = run.session.command;
   assert.deepEqual(cmd.slice(0, 4), ['wt', '-w', 'orchestra', 'new-tab']);
   assert.ok(cmd.includes(path.join(ROOT, 'bin', 'launch.mjs')) && cmd.includes(run.id) && cmd.includes(run.hookToken));
   assert.ok(!cmd.some((c) => /^http/.test(c)), 'no server address');
-  assert.equal(run.boxes[0].status, 'running');
+  assert.equal(run.steps[0].status, 'running');
 
   // The tab splits: the steps pane (orch watch) on the right, focus back on claude.
   const split = cmd.indexOf('split-pane');
@@ -403,7 +405,7 @@ test('a run opens a terminal tab; its launcher gets the session, the hooks and t
   assert.equal(status, 200);
   const a = spec.args;
   assert.equal(a[a.indexOf('--resume') + 1], run.sessionId, 'the session started, so it resumes');
-  assert.equal(a.at(-1), '/orchestra-hello Bappy', 'the first box, with the run input');
+  assert.equal(a.at(-1), '/orchestra-hello Bappy', 'the first step, with the run input');
   const settings = JSON.parse(a[a.indexOf('--settings') + 1]);
   for (const e of ['PreToolUse', 'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SessionEnd']) assert.ok(settings.hooks[e], e);
   assert.equal(settings.hooks.Stop[0].hooks[0].timeout, 1800, 'the Stop hook may wait for the app');
@@ -419,7 +421,7 @@ test('a run opens a terminal tab; its launcher gets the session, the hooks and t
   assert.equal(spec.env.ITP_REGISTRY_OFF, '1');
   assert.match(spec.env.GIT_CONFIG_VALUE_0 || Object.values(spec.env).join(' '), /git-hooks/);
   assert.equal((await getRun(run.id)).session.pid, pid);
-  assert.ok(!(await launch(run)).body.args.includes('/orchestra-hello Bappy'), 'the first box is given once');
+  assert.ok(!(await launch(run)).body.args.includes('/orchestra-hello Bappy'), 'the first step is given once');
   await close(run);
 });
 
@@ -427,17 +429,17 @@ test('models: a step with another model or effort restarts claude on the same co
   // A template default, one step that overrides it, checked values, and ultracode said to be costly.
   assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'model-demo')).code, 0);
   assert.equal((await orchText('template', 'set', 'model-demo', 'model=opus', 'effort=high')).code, 0);
-  assert.equal((await orchText('template', 'box', 'model-demo', 'recap', 'model=sonnet')).code, 0);
-  assert.match((await orchText('template', 'box', 'model-demo', 'recap', 'model=GPT 4!')).err, /model must be opus, sonnet/);
-  assert.match((await orchText('template', 'box', 'model-demo', 'recap', 'effort=huge')).err, /effort must be low, medium/);
-  assert.match((await orchText('template', 'box', 'model-demo', 'hello', 'effort=ultracode')).out, /hello[^\n]*ultracode \(many helpers, costly\)/);
-  const shown = (await orchText('template', 'box', 'model-demo', 'hello', 'effort=none')).out;
+  assert.equal((await orchText('template', 'step', 'model-demo', 'recap', 'model=sonnet')).code, 0);
+  assert.match((await orchText('template', 'step', 'model-demo', 'recap', 'model=GPT 4!')).err, /model must be opus, sonnet/);
+  assert.match((await orchText('template', 'step', 'model-demo', 'recap', 'effort=huge')).err, /effort must be low, medium/);
+  assert.match((await orchText('template', 'step', 'model-demo', 'hello', 'effort=ultracode')).out, /hello[^\n]*ultracode \(many helpers, costly\)/);
+  const shown = (await orchText('template', 'step', 'model-demo', 'hello', 'effort=none')).out;
   assert.match(shown, /default opus, effort high/);
   assert.match(shown, /2\. Recap [^\n]*sonnet/);
   assert.doesNotMatch(shown, /ultracode/);
 
   const run = await startRun(null, { templateId: 'model-demo' });
-  assert.deepEqual(run.boxes.map((b) => [b.model, b.effort]), [['opus', 'high'], ['sonnet', 'high']], 'the template fills the steps that name none');
+  assert.deepEqual(run.steps.map((b) => [b.model, b.effort]), [['opus', 'high'], ['sonnet', 'high']], 'the template fills the steps that name none');
   const { body: spec } = await launch(run, fakeLauncher());
   const a = spec.args;
   assert.equal(a[a.indexOf('--model') + 1], 'opus');
@@ -451,10 +453,10 @@ test('models: a step with another model or effort restarts claude on the same co
   assert.equal(spec.env.CLAUDE_CODE_DISABLE_CRON, '1');
   assert.match((await hook(run, 'status', { model: { display_name: 'Opus 5.5' }, cost: { total_cost_usd: 0.05 } })).body.line, /Say hello · Opus 5\.5 · \$0\.05/);
 
-  // Recap wants sonnet: no block (claude ends its turn), the restart flag is set, the box is started.
+  // Recap wants sonnet: no block (claude ends its turn), the restart flag is set, the step is started.
   assert.deepEqual((await hook(run, 'Stop', done('hello'))).body, {});
   let now = await getRun(run.id);
-  assert.deepEqual(now.boxes.map((b) => b.status), ['done', 'running']);
+  assert.deepEqual(now.steps.map((b) => b.status), ['done', 'running']);
   assert.equal(now.restart.model, 'sonnet');
   assert.ok(fs.existsSync(path.join(runsDir, run.id, 'restart.ok')));
   // claude ending now is the launcher's doing: the session stays open and the run keeps working.
@@ -479,7 +481,7 @@ test('models: a step with another model or effort restarts claude on the same co
   assert.equal((await getRun(run.id)).cost, 0.05, 'never back to 0');
   await hook(run, 'status', { cost: { total_cost_usd: 0.07 } });
   assert.equal((await getRun(run.id)).cost, 0.07, 'not counted twice');
-  assert.equal((await getRun(run.id)).boxes[1].cost || 0, 0);
+  assert.equal((await getRun(run.id)).steps[1].cost || 0, 0);
   assert.match((await logs(run)).join('\n'), /restarted claude with sonnet · effort high/);
   assert.deepEqual((await hook(run, 'Stop', done('recap'))).body, {});
   assert.equal((await getRun(run.id)).status, 'done');
@@ -489,7 +491,7 @@ test('models: a step with another model or effort restarts claude on the same co
 
 test('models: next or redo onto a step with another model restarts too; the same model does not', async () => {
   const run = await startRun([
-    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', waitAfter: true },
+    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', wait: true },
     { id: 'recap', skill: 'orchestra-recap', label: 'Recap', model: 'sonnet' },
   ]);
   const { body: spec } = await launch(run, fakeLauncher());
@@ -508,7 +510,7 @@ test('models: next or redo onto a step with another model restarts too; the same
 
 test('models: "/orchestra model" in the tab switches the step working now, on the same conversation, with no redo', async () => {
   const run = await startRun([
-    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', model: 'sonnet', effort: 'high', waitAfter: true },
+    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', model: 'sonnet', effort: 'high', wait: true },
     { id: 'recap', skill: 'orchestra-recap', label: 'Recap', model: 'sonnet' },
   ]);
   await launch(run, fakeLauncher());
@@ -523,10 +525,10 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   assert.equal(o.decision, 'block');
   assert.match(o.reason, /restarts this tab with opus, ultracode for "Say hello"[\s\S]*costs a lot/);
   let now = await getRun(run.id);
-  assert.deepEqual([now.boxes[0].model, now.boxes[0].effort, now.boxes[0].status], ['opus', 'ultracode', 'running']);
+  assert.deepEqual([now.steps[0].model, now.steps[0].effort, now.steps[0].status], ['opus', 'ultracode', 'running']);
   assert.equal(now.restart.fresh, false);
   assert.ok(fs.existsSync(path.join(runsDir, run.id, 'restart.ok')));
-  assert.ok(!now.chat.some((m) => /^\/orchestra model opus effort/.test(m.text)), 'a tab command, not talk');
+  assert.ok(!chatOf(now).some((m) => /^\/orchestra model opus effort/.test(m.text)), 'a tab command, not talk');
   const { body: again } = await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
   const a = again.args;
   assert.equal(a[a.indexOf('--resume') + 1], run.sessionId, 'the same conversation');
@@ -551,14 +553,14 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   assert.equal((await getRun(run.id)).status, 'waiting');
   assert.match((await say('/orchestra model haiku')).reason, /"Recap" \(the next step\) will run with haiku\. It starts with it when you type next/);
   assert.equal((await getRun(run.id)).restart, null);
-  assert.equal((await getRun(run.id)).boxes[1].model, 'haiku');
+  assert.equal((await getRun(run.id)).steps[1].model, 'haiku');
   await close(run);
 });
 
 test('back: "/orchestra back <step> why" copies the steps from there, keeps the old ones, and starts the copy', async () => {
   const run = await startRun([
-    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', waitAfter: true },
-    { id: 'recap', skill: 'orchestra-recap', label: 'Recap', waitAfter: true },
+    { id: 'hello', skill: 'orchestra-hello', label: 'Say hello', wait: true },
+    { id: 'recap', skill: 'orchestra-recap', label: 'Recap', wait: true },
     { id: 'last', skill: 'orchestra-hello', label: 'Last' },
   ]);
   await launch(run, fakeLauncher());
@@ -570,27 +572,27 @@ test('back: "/orchestra back <step> why" copies the steps from there, keeps the 
   // A step that has not finished, or a name that fits none: said, nothing changes.
   assert.match((await say('/orchestra back 3')).reason, /no finished step "3"\. Finished steps: 1\. Say hello · 2\. Recap/);
   assert.match((await orchText('back', run.id, 'nothing')).err, /no finished step "nothing"/);
-  assert.equal((await getRun(run.id)).boxes.length, 3);
+  assert.equal((await getRun(run.id)).steps.length, 3);
   // Back to step 1 with a why: copies of 1 and 2 after step 2, the first starts on this conversation.
   const o = await say('/orchestra back say hello the greeting is wrong');
   assert.equal(o.decision, 'block');
   assert.match(o.reason, /Added after "Recap": Say hello \(2\) > Recap \(2\)\. "Say hello \(2\)" starts on this conversation/);
   let now = await getRun(run.id);
-  assert.deepEqual(now.boxes.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'hello-2:running', 'recap-2:pending', 'last:pending']);
-  assert.equal(now.boxes[3].waitAfter, true, 'a copy keeps its settings');
+  assert.deepEqual(now.steps.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'hello-2:running', 'recap-2:pending', 'last:pending']);
+  assert.equal(now.steps[3].wait, true, 'a copy keeps its settings');
   assert.equal(now.restart.fresh, false);
-  assert.ok(!now.chat.some((m) => /^\/orchestra back/.test(m.text)), 'a tab command, not talk');
+  assert.ok(!chatOf(now).some((m) => /^\/orchestra back/.test(m.text)), 'a tab command, not talk');
   const { body: spec } = await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
   const p = spec.args.at(-1);
   assert.equal(spec.args[spec.args.indexOf('--resume') + 1], run.sessionId);
-  assert.match(p, /box "Say hello \(2\)": run the skill \/orchestra-hello/);
+  assert.match(p, /step "Say hello \(2\)": run the skill \/orchestra-hello/);
   assert.match(p, /went back to this step[\s\S]*Why the user went back: the greeting is wrong[\s\S]*- Recap \(\/orchestra-recap\)/);
   // While a copy works, the CLI refuses; in the tab, going back again puts the working step back in line.
   assert.match((await orchText('back', run.id, 'recap')).err, /working now/);
   assert.match((await say('/orchestra from recap: wrong words')).reason, /Recap \(3\)\. "Say hello \(2\)" runs again after them/);
   now = await getRun(run.id);
-  assert.deepEqual(now.boxes.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'recap-3:running', 'hello-2:pending', 'recap-2:pending', 'last:pending']);
-  assert.equal(now.boxes[2].why, 'wrong words');
+  assert.deepEqual(now.steps.map((b) => `${b.id}:${b.status}`), ['hello:done', 'recap:done', 'recap-3:running', 'hello-2:pending', 'recap-2:pending', 'last:pending']);
+  assert.equal(now.steps[2].why, 'wrong words');
   await runnerCall('relaunchSpec', [run.id, run.hookToken, now.session.pid]);
   // The CLI on a waiting run: adds the copies, starts nothing; next starts them.
   await hook(run, 'Stop', done('recap-3'));
@@ -599,7 +601,7 @@ test('back: "/orchestra back <step> why" copies the steps from there, keeps the 
   assert.equal(cli.code, 0, cli.err);
   assert.match(cli.out, /went back\. New steps: Say hello \(3\) > Recap \(4\) > Recap \(5\)\.[\s\S]*asks you why[\s\S]*Type next in its tab/);
   now = await getRun(run.id);
-  assert.equal(now.boxes.find((b) => b.id === 'hello-3').status, 'pending');
+  assert.equal(now.steps.find((b) => b.id === 'hello-3').status, 'pending');
   assert.equal(now.restart, null);
   await close(run);
 });
@@ -656,7 +658,7 @@ test('fresh: a step starts a new conversation with the story so far; the cost go
   assert.ok(second && second !== first, 'a new conversation');
   const prompt = a.at(-1);
   assert.match(prompt, /continues an Orchestra run in a new conversation/);
-  assert.match(prompt, /Say hello \(\/orchestra-hello\): - I did hello, because the box asked\./, 'what the step before did');
+  assert.match(prompt, /Say hello \(\/orchestra-hello\): - I did hello, because the step asked\./, 'what the step before did');
   assert.match(prompt, /run the skill \/orchestra-recap/);
   assert.equal(a[a.indexOf('--effort') + 1], 'ultracode');
   assert.equal(spec.env.CLAUDE_CODE_DISABLE_WORKFLOWS, undefined, 'an ultracode step gets its helper agents');
@@ -669,7 +671,7 @@ test('fresh: a step starts a new conversation with the story so far; the cost go
   assert.equal(now.sessionId, second);
   assert.match((await logs(run)).join('\n'), /started a new conversation · effort ultracode/);
   await hook(run, 'Stop', done('recap'));
-  assert.equal((await getRun(run.id)).boxes[1].cost, 0.02);
+  assert.equal((await getRun(run.id)).steps[1].cost, 0.02);
 
   // Clean-up removes both conversations' files.
   const proj = path.join(tmp, 'claude-projects', 'C--o-9');
@@ -687,18 +689,18 @@ test('a finished step moves on by itself; the last one ends the run; costs come 
   assert.equal(r1.body.output.decision, 'block');
   assert.match(r1.body.output.reason, /run the skill \/orchestra-recap/);
   let now = await getRun(run.id);
-  assert.deepEqual(now.boxes.map((b) => b.status), ['done', 'running']);
-  assert.equal(now.boxes[0].summary, 'hello');
-  assert.equal(now.boxes[0].didWhy, '- I did hello, because the box asked.');
-  assert.equal(now.boxes[0].cost, 0.05);
+  assert.deepEqual(now.steps.map((b) => b.status), ['done', 'running']);
+  assert.equal(now.steps[0].summary, 'hello');
+  assert.equal(now.steps[0].didWhy, '- I did hello, because the step asked.');
+  assert.equal(now.steps[0].cost, 0.05);
   await hook(run, 'status', { cost: { total_cost_usd: 0.08 } });
-  assert.deepEqual((await hook(run, 'Stop', done('recap'))).body, {}, 'the last box: Claude may stop');
+  assert.deepEqual((await hook(run, 'Stop', done('recap'))).body, {}, 'the last step: Claude may stop');
   now = await getRun(run.id);
   assert.equal(now.status, 'done');
-  assert.equal(now.boxes[1].cost, 0.03);
+  assert.equal(now.steps[1].cost, 0.03);
   assert.equal(now.cost, 0.08);
   const { body: tpl } = await api('GET', '/api/templates/demo-hello-recap');
-  assert.equal(tpl.boxes[0].status, undefined, 'the template stays the same');
+  assert.equal(tpl.steps[0].status, undefined, 'the template stays the same');
   await close(run);
 });
 
@@ -710,8 +712,8 @@ test('the run says what its ticket is about; the steps pane, run and board show 
   await hook(run, 'Stop', done('hello\n**ORCHESTRA:ABOUT: Fix the login page - the button must show for new users.**'));
   let now = await getRun(run.id);
   assert.equal(now.about, 'Fix the login page - the button must show for new users.');
-  assert.deepEqual(now.boxes.map((b) => b.status), ['done', 'running']);
-  assert.ok(!now.boxes[0].summary.includes('ORCHESTRA:ABOUT'), 'the line is taken out of the step summary');
+  assert.deepEqual(now.steps.map((b) => b.status), ['done', 'running']);
+  assert.ok(!now.steps[0].summary.includes('ORCHESTRA:ABOUT'), 'the line is taken out of the step summary');
   assert.equal(context(await hook(run, 'UserPromptSubmit', { prompt: 'thanks' })), '', 'known: no more asking');
   await hook(run, 'Stop', done('hello\nORCHESTRA:ABOUT: something else'));
   assert.equal((await getRun(run.id)).about, now.about, 'said once; a later line does not replace it');
@@ -738,12 +740,12 @@ test('pins: Claude pins steps, you pin answers and notes; the pane shows and scr
   await hook(run, 'Stop', say(`Ready to test.\n${block}\nTell me what fails.\n\nWHAT I DID AND WHY:\n- planned the test\nORCHESTRA:DONE`));
   await hook(run, 'Stop', say(`Here they are again:\n${block}`));
   let now = await getRun(run.id);
-  assert.deepEqual(now.boxes.map((b) => b.status), ['done', 'running']);
+  assert.deepEqual(now.steps.map((b) => b.status), ['done', 'running']);
   assert.equal(now.pins.length, 1, 'the same steps again are not pinned twice');
   assert.equal(now.pins[0].title, 'Test steps');
   assert.equal(now.pins[0].from, 'claude');
   assert.match(now.pins[0].text, /^1\. Open \*\*Pillar 2\*\* → GIR\n2\./);
-  assert.ok(!now.boxes[0].summary.includes('ORCHESTRA:PIN') && now.boxes[0].summary.includes('Open'), 'the markers go, the steps stay');
+  assert.ok(!now.steps[0].summary.includes('ORCHESTRA:PIN') && now.steps[0].summary.includes('Open'), 'the markers go, the steps stay');
 
   // You pin Claude's last answer (the prompt is not sent), and the one before; and a note.
   await hook(run, 'Stop', say('Use client Demo-3 and year 2025.\n\nWHAT I DID AND WHY:\n- notes'));
@@ -757,7 +759,7 @@ test('pins: Claude pins steps, you pin answers and notes; the pane shows and scr
   now = await getRun(run.id);
   assert.deepEqual(now.pins.map((p) => p.from), ['claude', 'answer', 'answer', 'you']);
   assert.ok(!now.pins[1].text.includes('WHAT I DID'), 'the notes are left out');
-  const said = now.chat.map((m) => m.text);
+  const said = chatOf(now).map((m) => m.text);
   assert.ok(!said.some((t) => /^pin( \d+|:.*)?$/i.test(t)), 'pin words are not talk');
   assert.ok(said.includes('pin the lodash version please'), 'talk stays talk');
 
@@ -798,7 +800,7 @@ test('pins: Claude pins steps, you pin answers and notes; the pane shows and scr
   await hook(run, 'Stop', say('ORCHESTRA:PIN Try it\n1. click Save\nORCHESTRA:FAILED'));
   now = await getRun(run.id);
   assert.equal(now.pins.at(-1).text, '1. click Save');
-  assert.equal(now.boxes[1].status, 'failed');
+  assert.equal(now.steps[1].status, 'failed');
 
   // Wide characters (✅ takes 2 columns) and narrow panes: no line is wider than the pane; __init__ stays.
   await orch('pin', run.id, `${'✅ build ok, '.repeat(8)}call __init__ and https://example.com/${'x'.repeat(80)}`);
@@ -823,38 +825,38 @@ test('the pane width is a setting', async () => {
   await close(run);
 });
 
-test('no marker: the run needs you; FAILED fails; redo runs the box again; next skips it', async () => {
+test('no marker: the run needs you; FAILED fails; redo runs the step again; next skips it', async () => {
   const run = await startRun();
   await hook(run, 'Stop', say('Which color do you like? I suggest blue.'));
   let now = await getRun(run.id);
   assert.equal(now.status, 'needs-you');
   assert.match(now.asks, /Which color/);
-  assert.equal(now.boxes[0].status, 'running', 'the box goes on with your answer');
+  assert.equal(now.steps[0].status, 'running', 'the step goes on with your answer');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'blue' })), /^Once you know what this run's ticket/, 'only the ABOUT ask');
   now = await getRun(run.id);
   assert.equal(now.status, 'running');
-  assert.equal(now.chat.at(-1).text, 'blue', 'kept for the lessons');
+  assert.equal(chatOf(now).at(-1).text, 'blue', 'kept for the lessons');
 
   await hook(run, 'Stop', say('The file is locked.\nORCHESTRA:FAILED'));
   now = await getRun(run.id);
   assert.equal(now.status, 'failed');
-  assert.equal(now.boxes[0].failures, 1);
-  assert.match(now.boxes[0].error, /locked/);
+  assert.equal(now.steps[0].failures, 1);
+  assert.match(now.steps[0].error, /locked/);
   // next on a failed step does not move past it: it says redo or skip.
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /"Say hello" failed[\s\S]*redo[\s\S]*skip/);
-  assert.equal((await getRun(run.id)).boxes[0].status, 'failed');
+  assert.equal((await getRun(run.id)).steps[0].status, 'failed');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'redo' })), /run this step again.*\/orchestra-hello/);
   now = await getRun(run.id);
-  assert.deepEqual([now.status, now.boxes[0].status, now.boxes[0].attempts], ['running', 'running', 2]);
+  assert.deepEqual([now.status, now.steps[0].status, now.steps[0].attempts], ['running', 'running', 2]);
 
   // next on a step that has not said it is done goes on with it (never marks it done); skip moves past it.
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /go on with the step "Say hello" from where you stopped \(do not start it again\)/);
   now = await getRun(run.id);
-  assert.deepEqual([now.status, now.boxes[0].status, now.boxes[1].status], ['running', 'running', 'pending']);
+  assert.deepEqual([now.status, now.steps[0].status, now.steps[1].status], ['running', 'running', 'pending']);
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'skip' })), /\/orchestra-recap/);
   now = await getRun(run.id);
-  assert.equal(now.boxes[0].note, 'skipped by you');
-  assert.equal(now.boxes[1].status, 'running');
+  assert.equal(now.steps[0].note, 'skipped by you');
+  assert.equal(now.steps[1].status, 'running');
   await hook(run, 'Stop', done('recap'));
   assert.equal((await getRun(run.id)).status, 'done');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /All steps .* are done/);
@@ -891,7 +893,7 @@ const appUp = async () => {
 };
 
 test('app: runs wait in line for the app; it is held until next; a closed tab hands it on', async () => {
-  const a = await startRun([{ id: 'test', skill: 'orchestra-hello', label: 'Test in the app', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+  const a = await startRun([{ id: 'test', skill: 'orchestra-hello', label: 'Test in the app', wait: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   const b = await startRun();
   const c = await startRun();
   try {
@@ -924,7 +926,7 @@ test('app: runs wait in line for the app; it is held until next; a closed tab ha
 });
 
 test('app: a run waiting for you after a step may take the app (preqa); next lets go of it', async () => {
-  const a = await startRun([{ id: 'review', skill: 'orchestra-hello', label: 'Review', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+  const a = await startRun([{ id: 'review', skill: 'orchestra-hello', label: 'Review', wait: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   const b = await startRun();
   try {
     await hook(a, 'Stop', done('reviewed'));
@@ -1241,14 +1243,14 @@ test('setup: a fresh clone learns the ITP folder, gets the starter templates and
   const skill = fs.readFileSync(path.join(home, 'orchestra', 'SKILL.md'), 'utf8');
   assert.ok(!skill.includes('{{'), 'placeholders filled');
   assert.ok(skill.includes(`node ${ROOT.replace(/\\/g, '/')}/bin/orch.mjs`), 'names this clone');
-  assert.ok(fs.existsSync(path.join(home, 'orchestra-app-test', 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(home, 'app-test', 'SKILL.md')));
   // Now it works, and a second setup changes nothing of yours.
   assert.equal((await fresh('status')).code, 0);
   fs.writeFileSync(path.join(data, 'templates', 'feature-template.json'), '{"mine": true}');
   fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit\n');
   const again = await fresh('setup');
   assert.match(again.out, /orchestra: updated \(your changed copy: SKILL\.md\.bak-\d{4}-\d\d-\d\d\)/);
-  assert.match(again.out, /orchestra-app-test: up to date/);
+  assert.match(again.out, /app-test: up to date/);
   assert.equal(fs.readFileSync(path.join(data, 'templates', 'feature-template.json'), 'utf8'), '{"mine": true}', 'your template is kept');
   // A second hand edit the same day gets its own backup, never over the first.
   fs.appendFileSync(path.join(home, 'orchestra', 'SKILL.md'), '\nmy edit 2\n');
@@ -1261,8 +1263,8 @@ test('setup: a fresh clone learns the ITP folder, gets the starter templates and
   assert.match((await fresh('setup')).out, /orchestra: updated\n/);
 });
 
-test('a "wait for me" box stops the run; next goes on; you are notified', async () => {
-  const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', waitAfter: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+test('a "wait for me" step stops the run; next goes on; you are notified', async () => {
+  const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', wait: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   assert.deepEqual((await hook(run, 'Stop', done('hello'))).body, {}, 'Claude stops at the gate');
   let now = await getRun(run.id);
   assert.equal(now.status, 'waiting');
@@ -1278,16 +1280,16 @@ test('a "wait for me" box stops the run; next goes on; you are notified', async 
   assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 409, 'the browser points you to the terminal');
   assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-recap/);
   now = await getRun(run.id);
-  assert.deepEqual([now.status, now.boxes[1].status], ['running', 'running']);
+  assert.deepEqual([now.status, now.steps[1].status], ['running', 'running']);
   await close(run);
 });
 
-test('a box with "explain" ticked gets a code walk-through before the next box', async () => {
-  const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', walkthrough: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+test('a step with "explain" ticked gets a code walk-through before the next step', async () => {
+  const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', explain: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   const r = await hook(run, 'Stop', done('hello'));
   assert.match(r.body.output.reason, /walk me through the code/);
   assert.match((await hook(run, 'Stop', say('a.cs:1 uses a guard clause.\nORCHESTRA:DONE'))).body.output.reason, /\/orchestra-recap/);
-  assert.equal((await getRun(run.id)).boxes[1].status, 'running');
+  assert.equal((await getRun(run.id)).steps[1].status, 'running');
   await close(run);
 });
 
@@ -1312,7 +1314,7 @@ test('a closed tab stops the run; Reopen resumes the same session; a restart not
   await hook(run, 'SessionEnd', { reason: 'exit' });
   let now = await getRun(run.id);
   assert.deepEqual([now.status, now.session.open], ['stopped', false]);
-  assert.match(now.boxes[1].note, /Cut off: the tab closed[\s\S]*next to go on with it, or redo/);
+  assert.match(now.steps[1].note, /Cut off: the tab closed[\s\S]*next to go on with it, or redo/);
   await runnerCall('onClosed', [run.id, run.hookToken]); // the launcher too: nothing more happens
   assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 200);
   now = await waitFor(async () => ((await getRun(run.id)).session?.open ? getRun(run.id) : null), 'the reopened session');
@@ -1338,7 +1340,7 @@ function writeRun(id, fields) {
   fs.writeFileSync(path.join(runsDir, id, 'state.json'), JSON.stringify({
     id, templateId: 'demo-hello-recap', templateName: 'Demo', tracking: true, input: { text: id }, hookToken: 'tok', chat: [], cost: 0,
     cwd: path.join(runsDir, id, 'work'), repoPlan: [], workspace: null, createdAt: new Date().toISOString(),
-    boxes: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', status: 'pending' }],
+    steps: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', status: 'pending' }],
     ...fields,
   }));
 }
@@ -1452,7 +1454,7 @@ test('hooks need the run token; Stop ends the session; delete waits for it', asy
   const run = await startRun();
   assert.deepEqual((await hook(run, 'Stop', done('x'), 'nope')).body, {}, 'a wrong token changes nothing');
   assert.deepEqual((await hook(run, 'Stop', done('x'), '')).body, {});
-  assert.equal((await getRun(run.id)).boxes[0].status, 'running');
+  assert.equal((await getRun(run.id)).steps[0].status, 'running');
   assert.ok((await logs(run)).some((t) => /hook Stop failed: wrong run token/.test(t)));
   assert.equal((await api('DELETE', `/api/runs/${run.id}`)).status, 409, 'its tab is open');
   assert.equal((await close(run)).body.status, 'stopped');
@@ -1525,22 +1527,22 @@ test('several Jira tickets at once: one run each, in order; each tab is named af
   }
 });
 
-test('app lock: a box that starts the app waits in the Stop hook until the app is free', async () => {
-  const a = await startRun([{ id: 'app', skill: 'orchestra-hello', usesApp: true }]);
-  const b = await startRun([{ id: 'hello', skill: 'orchestra-hello' }, { id: 'app', skill: 'orchestra-recap', usesApp: true }]);
+test('app lock: a step that starts the app waits in the Stop hook until the app is free', async () => {
+  const a = await startRun([{ id: 'app', skill: 'orchestra-hello', app: true }]);
+  const b = await startRun([{ id: 'hello', skill: 'orchestra-hello' }, { id: 'app', skill: 'orchestra-recap', app: true }]);
   let answered = null;
   const bStop = hook(b, 'Stop', done('hello')).then((r) => (answered = r));
-  await waitFor(async () => /Waiting for the app/.test((await getRun(b.id)).boxes[1].note || ''), 'run b to wait for the app');
+  await waitFor(async () => /Waiting for the app/.test((await getRun(b.id)).steps[1].note || ''), 'run b to wait for the app');
   await sleep(300);
   assert.equal(answered, null, 'the Stop hook is still waiting');
   await hook(a, 'Stop', done('app work'));
   await bStop;
   assert.match(answered.body.output.reason, /\/orchestra-recap/);
-  assert.equal((await getRun(b.id)).boxes[1].status, 'running');
+  assert.equal((await getRun(b.id)).steps[1].status, 'running');
 
-  // A run whose first box needs the app stays in the queue while another run has it.
+  // A run whose first step needs the app stays in the queue while another run has it.
   const { body: c } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'c' }, start: false });
-  await api('PUT', `/api/runs/${c.id}/boxes`, { boxes: [{ id: 'app', skill: 'orchestra-hello', usesApp: true }] });
+  await api('PUT', `/api/runs/${c.id}/steps`, { steps: [{ id: 'app', skill: 'orchestra-hello', app: true }] });
   await api('POST', `/api/runs/${c.id}/resume`);
   await sleep(300);
   assert.equal((await getRun(c.id)).status, 'queued');
@@ -1591,16 +1593,22 @@ function makeFakeItp() {
   fs.writeFileSync(path.join(api, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
   return { root, api, worktrees: path.join(tmp, 'wt') };
 }
+// The fake ITP folder, made once, and the env that points at it (so a workspace test can run alone).
+let fakeItp = null;
+function useFakeItp() {
+  fakeItp ||= makeFakeItp();
+  useEnv({ ORCHESTRA_ITP_ROOT: fakeItp.root, ORCHESTRA_WORKTREES_DIR: fakeItp.worktrees });
+  return fakeItp;
+}
 const gitIn = (dir, args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'f', GIT_AUTHOR_EMAIL: 'f@f', GIT_COMMITTER_NAME: 'f', GIT_COMMITTER_EMAIL: 'f@f' } });
 
 test('workspace: worktrees start from the latest dev code with no branch; the branch the skill makes is followed', async () => {
-  const itp = makeFakeItp();
-  useEnv({ ORCHESTRA_ITP_ROOT: itp.root, ORCHESTRA_WORKTREES_DIR: itp.worktrees });
+  const itp = useFakeItp();
   await api('PUT', '/api/settings', { maxRunning: 20 });
   const { body: repos } = await api('GET', '/api/repos');
   assert.deepEqual(repos.map((r) => r.token), ['api'], 'the ITP workspace repo itself is never offered');
   assert.equal(repos[0].defaultBase, 'origin/development/mission');
-  const tpl = { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] };
+  const tpl = { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], steps: [{ id: 'hello', skill: 'orchestra-hello' }] };
   assert.equal((await api('PUT', '/api/templates/ws-demo', tpl)).status, 200);
   try {
     const run = await startRun(null, { templateId: 'ws-demo', input: 'PROJ-9 fix it' });
@@ -1664,10 +1672,44 @@ test('workspace: worktrees start from the latest dev code with no branch; the br
   }
 });
 
+test('upgrade: a run and a template saved with the old words (boxes, waitAfter, orchestra-wrap-up) work, and save as version 2', async () => {
+  // A template file from before: read as steps, the old skill name becomes the new one.
+  fs.writeFileSync(path.join(dataDir, 'templates', 'old-shape.json'), JSON.stringify({ id: 'old-shape', name: 'Old shape', tracking: false,
+    boxes: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', waitAfter: true, usesApp: false, walkthrough: false }, { id: 'wrap', skill: 'orchestra-wrap-up', label: 'Wrap up' }] }));
+  const shown = (await orchText('template', 'show', 'old-shape')).out;
+  assert.match(shown, /1\. Say hello \[hello\] \/orchestra-hello · wait after/);
+  assert.match(shown, /2\. Wrap up \[wrap\] \/wrap-up/);
+  assert.equal((await orchText('template', 'box', 'old-shape', 'hello', 'wait=off')).code, 0, 'the old "template box" still works');
+  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'templates', 'old-shape.json'), 'utf8'));
+  assert.deepEqual([saved.version, !!saved.boxes, saved.steps.map((s) => s.skill), saved.steps[0].wait], [2, false, ['orchestra-hello', 'wrap-up'], false]);
+  fs.rmSync(path.join(dataDir, 'templates', 'old-shape.json'));
+
+  // A run file from before, mid-way: its tab goes on.
+  const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', wait: true }, { id: 'recap', skill: 'orchestra-recap' }]);
+  await hook(run, 'Stop', done('hello'));
+  const file = path.join(runsDir, run.id, 'state.json');
+  const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete old.version;
+  old.boxes = old.steps.map(({ wait, app, explain, ...s }) => ({ ...s, waitAfter: wait, usesApp: app, walkthrough: explain }));
+  delete old.steps;
+  old.currentBox = old.currentStep;
+  delete old.currentStep;
+  old.chat = [{ id: 'msg-old', kind: 'you', text: 'said before', at: old.createdAt }];
+  fs.writeFileSync(file, JSON.stringify(old));
+  assert.match((await orchText('run', run.id)).out, /1\. orchestra-hello \(\/orchestra-hello\) · done[^\n]*wait after/);
+  assert.match(context(await hook(run, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-recap/, 'next goes on to the next step');
+  const now = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual([now.version, !!now.boxes, now.steps.length, now.currentStep], [2, false, 2, 'recap']);
+  assert.deepEqual(now.chat.map((m) => m.text), ['said before'], 'old chat stays readable');
+  assert.deepEqual(chatOf(now).map((m) => m.text), ['next'], 'new chat goes to chat.jsonl');
+  await close(run);
+});
+
 test('clean up: only when you say; it stops what runs from the folder, frees the space and the conversation; the run, branches and stats stay', async () => {
+  useFakeItp();
   await api('PUT', '/api/settings', { maxRunning: 20 });
-  await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] });
-  await api('PUT', '/api/templates/ws-wrap', { id: 'ws-wrap', name: 'Wrap demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello', waitAfter: true }, { id: 'wrap', skill: 'orchestra-wrap-up', label: 'Wrap up' }] });
+  await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], steps: [{ id: 'hello', skill: 'orchestra-hello' }] });
+  await api('PUT', '/api/templates/ws-wrap', { id: 'ws-wrap', name: 'Wrap demo', repos: ['api'], steps: [{ id: 'hello', skill: 'orchestra-hello', wait: true }, { id: 'wrap', skill: 'wrap-up', label: 'Wrap up' }] });
   const projects = path.join(tmp, 'claude-projects', 'C--o-test');
   fs.mkdirSync(projects, { recursive: true });
   let sleeper;
@@ -1715,6 +1757,8 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     assert.ok((await api('GET', '/api/stats')).body.history.some((h) => h.id === run.id), 'and so do its stats');
     assert.doesNotMatch((await orchText('runs')).out, /ship it/, 'a cleaned run leaves the board');
     assert.match((await orchText('runs', '--all')).out, /ship it/, 'and stays in runs --all');
+    assert.ok(fs.existsSync(path.join(runsDir, 'archive', run.id, 'state.json')) && !fs.existsSync(path.join(runsDir, run.id)), 'its record moved to the archive');
+    assert.match((await orchText('run', run.id)).out, /ship it/, 'orch run still shows it');
 
     // Wrap up, the last step: you type next when ready; pushes to main (vault, ITP folder) only while it works;
     // "not yet" waits for next; done means "clean when the tab closes", and closing it cleans up.
@@ -1727,7 +1771,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     assert.equal(fs.existsSync(flag), false);
     assert.equal(check('Bash', { command: 'cd ITPKV && git push origin main' }, genv)?.needsApproval, false, 'no vault push before Wrap up');
     const wrapAsk = context(await hook(run2, 'UserPromptSubmit', { prompt: 'next' }));
-    assert.match(wrapAsk, /\/orchestra-wrap-up/);
+    assert.match(wrapAsk, /\/wrap-up/);
     assert.match(wrapAsk, /Epic folder: 2026-10-28-ITP-E-09-merged/);
     assert.match(wrapAsk, /Pull requests: https:\/\/bitbucket\.org\/orbitax\/itp-api/);
     assert.ok(fs.existsSync(flag), 'the flag is there while Wrap up works');
@@ -1737,7 +1781,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     assert.equal(spec.env.ORCHESTRA_ITP_ROOT, path.join(tmp, 'itp').replace(/\\/g, '/'));
     await hook(run2, 'Stop', { last_assistant_message: 'Type next when you are ready, and I run the wrap-up again.' });
     assert.equal((await getRun(run2.id)).status, 'needs-you', 'not yet');
-    assert.match(context(await hook(run2, 'UserPromptSubmit', { prompt: 'next' })), /ready to wrap up now[\s\S]*\/orchestra-wrap-up/, 'next runs Wrap up again');
+    assert.match(context(await hook(run2, 'UserPromptSubmit', { prompt: 'next' })), /ready to wrap up now[\s\S]*\/wrap-up/, 'next runs Wrap up again');
     await hook(run2, 'Stop', done('pushed the vault, closed the epic'));
     const wrapped = await getRun(run2.id);
     assert.deepEqual([wrapped.status, wrapped.cleanWhenClosed], ['done', true]);
@@ -1785,10 +1829,10 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     const run6 = await startRun(null, { templateId: 'ws-demo', input: 'add later' });
     await hook(run6, 'Stop', done('hello'));
     assert.equal((await getRun(run6.id)).status, 'done');
-    assert.equal((await orch('boxes', run6.id, '--set', '[{"id":"other","skill":"orchestra-hello"},{"id":"wrap","skill":"orchestra-wrap-up"}]')).status, 409, 'a finished step stays');
-    assert.equal((await orch('boxes', run6.id, '--set', '[{"id":"hello","skill":"orchestra-hello"},{"id":"wrap","skill":"orchestra-wrap-up","label":"Wrap up"}]')).status, 200);
+    assert.equal((await orch('steps', run6.id, '--set', '[{"id":"other","skill":"orchestra-hello"},{"id":"wrap","skill":"wrap-up"}]')).status, 409, 'a finished step stays');
+    assert.equal((await orch('steps', run6.id, '--set', '[{"id":"hello","skill":"orchestra-hello"},{"id":"wrap","skill":"wrap-up","label":"Wrap up"}]')).status, 200);
     assert.equal((await getRun(run6.id)).status, 'waiting');
-    assert.match(context(await hook(run6, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-wrap-up/);
+    assert.match(context(await hook(run6, 'UserPromptSubmit', { prompt: 'next' })), /\/wrap-up/);
     await close(run6);
     assert.equal((await api('DELETE', `/api/runs/${run6.id}`)).status, 200);
 
@@ -1832,7 +1876,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
 
 test('workspace: commits made with no branch are saved on orchestra/<run id>', async () => {
   const itp = { api: path.join(tmp, 'itp', 'ITP-API') };
-  await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], boxes: [{ id: 'hello', skill: 'orchestra-hello' }] });
+  await api('PUT', '/api/templates/ws-demo', { id: 'ws-demo', name: 'Workspace demo', repos: ['api'], steps: [{ id: 'hello', skill: 'orchestra-hello' }] });
   try {
     const run = await startRun(null, { templateId: 'ws-demo', input: 'loose' });
     const wt = path.join(run.workspace.dir, 'ITP-API');
@@ -1915,11 +1959,11 @@ test('tracking OFF: marked skills are refused; your mark changes what is refused
 
   assert.equal((await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x' } })).status, 409, 'start refused');
   const { status, body: draft } = await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x' }, start: false });
-  assert.equal(status, 200, 'a draft is made, so you can remove the box');
+  assert.equal(status, 200, 'a draft is made, so you can remove the step');
   assert.equal((await api('POST', `/api/runs/${draft.id}/resume`)).status, 409);
   const hello = [{ id: 'hello', skill: 'orchestra-hello' }];
-  assert.equal((await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes: hello })).status, 200);
-  assert.equal((await api('PUT', `/api/runs/${draft.id}/boxes`, { boxes: [...hello, { id: 'recap', skill: 'orchestra-recap' }] })).status, 409, 'it cannot be added back');
+  assert.equal((await api('PUT', `/api/runs/${draft.id}/steps`, { steps: hello })).status, 200);
+  assert.equal((await api('PUT', `/api/runs/${draft.id}/steps`, { steps: [...hello, { id: 'recap', skill: 'orchestra-recap' }] })).status, 409, 'it cannot be added back');
   await api('POST', `/api/runs/${draft.id}/resume`);
   const run = await waitFor(async () => ((await getRun(draft.id)).session?.open ? getRun(draft.id) : null), 'the session');
   const spec = (await launch(run)).body;
@@ -1939,15 +1983,15 @@ test('tracking OFF: marked skills are refused; your mark changes what is refused
   await api('DELETE', '/api/templates/tracking-copy');
 });
 
-test('tracking OFF: a box whose skill is marked while the run works fails before it starts', async () => {
+test('tracking OFF: a step whose skill is marked while the run works fails before it starts', async () => {
   const run = await startRun();
   try {
     await api('PUT', '/api/skill-marks/orchestra-recap', { mark: 'writes' });
     assert.deepEqual((await hook(run, 'Stop', done('hello'))).body, {}, 'no next step is given');
     const now = await getRun(run.id);
     assert.equal(now.status, 'failed');
-    assert.deepEqual(now.boxes.map((b) => b.status), ['done', 'failed']);
-    assert.match(now.boxes[1].error, /writes to Teamspace or the vault/);
+    assert.deepEqual(now.steps.map((b) => b.status), ['done', 'failed']);
+    assert.match(now.steps[1].error, /writes to Teamspace or the vault/);
   } finally {
     await api('PUT', '/api/skill-marks/orchestra-recap', { mark: 'auto' });
     await close(run);
@@ -1959,17 +2003,17 @@ test('tracking OFF: a box whose skill is marked while the run works fails before
 test('stats: spend, per-template and per-skill numbers, and the history', async () => {
   const runs = [
     { id: 'r1', templateId: 't', templateName: 'T', status: 'done', cost: 0.5, createdAt: new Date().toISOString(), input: { text: 'a' },
-      boxes: [{ skill: 'x', attempts: 2, failures: 1, status: 'done', cost: 0.3, durationMs: 1000, error: null }, { skill: 'y', attempts: 1, status: 'done', cost: 0.2, durationMs: 3000 }] },
+      steps: [{ skill: 'x', attempts: 2, failures: 1, status: 'done', cost: 0.3, durationMs: 1000, error: null }, { skill: 'y', attempts: 1, status: 'done', cost: 0.2, durationMs: 3000 }] },
     { id: 'r2', templateId: 't', templateName: 'T', status: 'failed', cost: 0.1, createdAt: '2020-01-01T00:00:00Z', input: { text: 'b' },
-      boxes: [{ skill: 'x', attempts: 1, status: 'failed', cost: 0.1, error: 'boom', endedAt: '2020-01-01T00:01:00Z' }, { skill: 'y', attempts: 0, status: 'pending', cost: 0 }] },
+      steps: [{ skill: 'x', attempts: 1, status: 'failed', cost: 0.1, error: 'boom', endedAt: '2020-01-01T00:01:00Z' }, { skill: 'y', attempts: 0, status: 'pending', cost: 0 }] },
   ];
   const s = computeStats(runs);
   assert.deepEqual([s.totals.runs, s.totals.done, s.totals.failed, s.totals.cost, s.totals.costToday], [2, 1, 1, 0.6, 0.5]);
   assert.deepEqual(s.templates[0], { id: 't', name: 'T', runs: 2, done: 1, failed: 1, cost: 0.6, avgCost: 0.5, avgWorkMs: 4000 });
   const x = s.skills.find((k) => k.skill === 'x');
-  assert.deepEqual([x.boxes, x.tries, x.failures, x.done, x.avgMs, x.lastError, x.lastErrorRun], [2, 3, 2, 1, 1000, 'boom', 'r2']);
+  assert.deepEqual([x.steps, x.tries, x.failures, x.done, x.avgMs, x.lastError, x.lastErrorRun], [2, 3, 2, 1, 1000, 'boom', 'r2']);
   assert.equal(s.skills[0].skill, 'x', 'most failures first');
-  assert.equal(s.skills.find((k) => k.skill === 'y').boxes, 1, 'a box that never ran is left out');
+  assert.equal(s.skills.find((k) => k.skill === 'y').steps, 1, 'a step that never ran is left out');
   assert.deepEqual(s.history.map((r) => r.id), ['r1', 'r2']);
   const { status, body } = await api('GET', '/api/stats');
   assert.equal(status, 200);
@@ -1977,20 +2021,20 @@ test('stats: spend, per-template and per-skill numbers, and the history', async 
 });
 
 test('learn: what a run teaches is read from your words and its failures', () => {
-  const run = { templateName: 'T', boxes: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 2, failures: 1, error: 'boom' }],
+  const run = { templateName: 'T', steps: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 2, failures: 1, error: 'boom' }],
     chat: [{ kind: 'you', text: 'blue' }, { text: 'hurry up' }] };
   const m = material(run);
   assert.match(m, /chat: blue/);
   assert.match(m, /chat: hurry up/);
   assert.match(m, /failed 1 time\(s\)\. Last error: boom/);
-  assert.equal(material({ boxes: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 1 }], chat: [] }), '');
+  assert.equal(material({ steps: [{ id: 'a', label: 'A', skill: 'x', status: 'done', attempts: 1 }], chat: [] }), '');
   assert.deepEqual(parseSuggestions('```json\n{"rules":[{"text":" r ","why":"w"},{"nope":1}],"workflow":[{"text":"c"}]}\n```'),
     [{ kind: 'rule', text: 'r', why: 'w' }, { kind: 'workflow', text: 'c', why: '', change: null }]);
   // A workflow change keeps only an exact change Orchestra knows how to make.
-  const [w] = parseSuggestions('{"workflow":[{"text":"c","change":{"op":"box","box":"plan","wait":true,"args":" show it ","bad":1}}]}');
-  assert.deepEqual(w.change, { op: 'box', box: 'plan', wait: 'on', args: 'show it' });
-  assert.equal(parseSuggestions('{"workflow":[{"text":"c","change":{"op":"box","box":"plan"}}]}')[0].change, null, 'a change that changes nothing');
-  assert.equal(parseSuggestions('{"workflow":[{"text":"c","change":{"op":"drop","box":"../x"}}]}')[0].change, null);
+  const [w] = parseSuggestions('{"workflow":[{"text":"c","change":{"op":"step","step":"plan","wait":true,"args":" show it ","bad":1}}]}');
+  assert.deepEqual(w.change, { op: 'step', step: 'plan', wait: 'on', args: 'show it' });
+  assert.equal(parseSuggestions('{"workflow":[{"text":"c","change":{"op":"step","step":"plan"}}]}')[0].change, null, 'a change that changes nothing');
+  assert.equal(parseSuggestions('{"workflow":[{"text":"c","change":{"op":"drop","step":"../x"}}]}')[0].change, null);
   assert.deepEqual(parseSuggestions('{"workflow":[{"text":"c","change":{"op":"add","skill":"x-y","at":"2","wait":"on"}}]}')[0].change, { op: 'add', skill: 'x-y', at: 2, wait: 'on' });
   assert.throws(() => parseSuggestions('no json here'));
 });
@@ -2015,11 +2059,11 @@ test('learn: after a run you talked to, lessons are suggested; an accepted rule 
 
   assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'accept', text: 'Use blue for all buttons.' })).status, 200);
   assert.equal((await api('POST', `/api/suggestions/${rule.id}`, { action: 'reject' })).status, 409, 'decided once');
-  assert.deepEqual(flow.change, { op: 'box', box: 'hello', wait: 'on' });
-  assert.match((await orchText('suggestions')).out, /change: template box demo-hello-recap hello wait=on/);
+  assert.deepEqual(flow.change, { op: 'step', step: 'hello', wait: 'on' });
+  assert.match((await orchText('suggestions')).out, /change: template step demo-hello-recap hello wait=on/);
   // Accepted without --apply: only marked, and listed as not in the template yet.
-  assert.match((await orchText('suggestion', flow.id, 'accept')).out, /Not in the template yet[^]*template box demo-hello-recap hello wait=on[^]*suggestion \S+ apply/);
-  assert.equal((await api('GET', '/api/templates/demo-hello-recap')).body.boxes[0].waitAfter, false, 'accept alone changes nothing');
+  assert.match((await orchText('suggestion', flow.id, 'accept')).out, /Not in the template yet[^]*template step demo-hello-recap hello wait=on[^]*suggestion \S+ apply/);
+  assert.equal((await api('GET', '/api/templates/demo-hello-recap')).body.steps[0].wait, false, 'accept alone changes nothing');
   assert.match((await orchText('suggestions')).out, new RegExp(`Accepted, not in the template yet[^]*${flow.id}`));
   assert.equal((await api('POST', `/api/suggestions/${flow.id}`, { action: 'maybe' })).status, 400);
   // Apply: to a template that is gone, a hint; to the named one (a copy, so other tests keep the demo as is), the change.
@@ -2028,7 +2072,7 @@ test('learn: after a run you talked to, lessons are suggested; an accepted rule 
   assert.match(gone.err + gone.out, /not there any more[^]*--template/);
   assert.equal((await orchText('template', 'copy', 'demo-hello-recap', 'lesson-copy')).code, 0);
   assert.match((await orchText('suggestion', flow.id, 'apply', '--template', 'lesson-copy')).out, /accepted and applied[^]*Step hello changed/);
-  assert.equal((await api('GET', '/api/templates/lesson-copy')).body.boxes[0].waitAfter, true);
+  assert.equal((await api('GET', '/api/templates/lesson-copy')).body.steps[0].wait, true);
   assert.doesNotMatch((await orchText('suggestions')).out, /Accepted, not in the template yet/);
   assert.match((await orchText('suggestions', '--all')).out, /applied to lesson-copy/);
   // A rule cannot be applied; a change can be given by hand (old lessons have none).
@@ -2056,15 +2100,15 @@ test('learn: after a run you talked to, lessons are suggested; an accepted rule 
 // ---- the orch command, the lock, and old tabs ----
 
 test('orch: broken template files are skipped; bad input is refused', async () => {
-  fs.writeFileSync(path.join(dataDir, 'templates/broken.json'), '{"boxes": 1}');
+  fs.writeFileSync(path.join(dataDir, 'templates/broken.json'), '{"steps": 1}');
   const { status, body } = await api('GET', '/api/templates');
   assert.equal(status, 200);
   assert.deepEqual(body.map((t) => t.id), ['demo-hello-recap']);
   fs.rmSync(path.join(dataDir, 'templates/broken.json'));
   assert.equal((await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: 'x'.repeat(9000) } })).status, 400);
-  assert.equal((await api('PUT', '/api/templates/ok-id', { name: 'x', boxes: [] })).status, 400);
-  assert.equal((await api('PUT', '/api/templates/ok-id', { name: 'x', boxes: [{ id: 'a', skill: 'bad skill!' }] })).status, 400);
-  assert.equal((await api('PUT', '/api/templates/..%2Fx', { name: 'x', boxes: [{ id: 'a', skill: 'orchestra-hello' }] })).status, 400);
+  assert.equal((await api('PUT', '/api/templates/ok-id', { name: 'x', steps: [] })).status, 400);
+  assert.equal((await api('PUT', '/api/templates/ok-id', { name: 'x', steps: [{ id: 'a', skill: 'bad skill!' }] })).status, 400);
+  assert.equal((await api('PUT', '/api/templates/..%2Fx', { name: 'x', steps: [{ id: 'a', skill: 'orchestra-hello' }] })).status, 400);
   assert.equal((await api('GET', '/api/runs/..%2Fx')).status, 404);
   assert.equal((await api('POST', '/api/runs', { templateId: 'nope' })).status, 404);
   assert.equal((await api('PUT', '/api/settings', { learn: 'maybe' })).status, 400);
@@ -2081,17 +2125,17 @@ test('orch: a template is built step by step, as Claude does it when you talk', 
   await t('add', 'talk-demo', 'orchestra-recap', '--wait', '--label', 'Recap it');
   await t('add', 'talk-demo', 'orchestra-hello', '--at', '1', '--args', 'twice');
   let { body: tpl } = await t('show', 'Talk demo');
-  assert.deepEqual(tpl.boxes.map((b) => [b.id, b.skill, !!b.waitAfter]), [['orchestra-hello-2', 'orchestra-hello', false], ['orchestra-hello', 'orchestra-hello', false], ['recap-it', 'orchestra-recap', true]]);
-  assert.equal(tpl.boxes[0].args, 'twice');
+  assert.deepEqual(tpl.steps.map((b) => [b.id, b.skill, !!b.wait]), [['orchestra-hello-2', 'orchestra-hello', false], ['orchestra-hello', 'orchestra-hello', false], ['recap-it', 'orchestra-recap', true]]);
+  assert.equal(tpl.steps[0].args, 'twice');
   await t('move', 'talk-demo', 'recap-it', '1');
-  await t('box', 'talk-demo', 'recap-it', 'wait=off', 'explain=on', 'label=Short recap');
+  await t('step', 'talk-demo', 'recap-it', 'wait=off', 'explain=on', 'label=Short recap');
   await t('remove', 'talk-demo', 'orchestra-hello-2');
   await t('set', 'talk-demo', 'name=Talk demo 2', 'tracking=on');
   ({ body: tpl } = await t('show', 'talk-demo'));
-  assert.deepEqual(tpl.boxes.map((b) => b.id), ['recap-it', 'orchestra-hello']);
-  assert.deepEqual([tpl.boxes[0].label, tpl.boxes[0].waitAfter, tpl.boxes[0].walkthrough, tpl.name, tpl.tracking], ['Short recap', false, true, 'Talk demo 2', true]);
+  assert.deepEqual(tpl.steps.map((b) => b.id), ['recap-it', 'orchestra-hello']);
+  assert.deepEqual([tpl.steps[0].label, tpl.steps[0].wait, tpl.steps[0].explain, tpl.name, tpl.tracking], ['Short recap', false, true, 'Talk demo 2', true]);
   assert.equal((await t('copy', 'talk-demo', 'talk-copy')).body.name, 'Talk demo 2 (copy)');
-  assert.equal((await t('box', 'talk-demo', 'recap-it', 'wait=maybe')).status, 400);
+  assert.equal((await t('step', 'talk-demo', 'recap-it', 'wait=maybe')).status, 400);
   const text = await orchText('template', 'show', 'talk-demo');
   assert.match(text.out, /1\. Short recap \[recap-it\] \/orchestra-recap · explain/);
   for (const id of ['talk-demo', 'talk-copy']) assert.equal((await t('delete', id)).status, 200);
@@ -2152,7 +2196,7 @@ test('lock: a lock left by a dead process is taken over; many hooks at once lose
   assert.equal(tl.length, 12);
   await Promise.all([hook(run, 'UserPromptSubmit', { prompt: 'one' }), hook(run, 'UserPromptSubmit', { prompt: 'two' }), hook(run, 'status', { cost: { total_cost_usd: 0.2 } })]);
   const now = await getRun(run.id);
-  assert.deepEqual(now.chat.map((m) => m.text).sort(), ['one', 'two'], 'no save overwrote another');
+  assert.deepEqual(chatOf(now).map((m) => m.text).sort(), ['one', 'two'], 'no save overwrote another');
   assert.equal(now.cost, 0.2);
   assert.ok(!fs.existsSync(path.join(runsDir, '.lock')), 'the lock is let go');
   await close(run);

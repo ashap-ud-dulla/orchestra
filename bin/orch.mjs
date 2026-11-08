@@ -16,6 +16,7 @@ import { moreCommands } from '../lib/cli/more.mjs';
 
 // Every command: one object per group (lib/cli/).
 const commands = { ...runCommands, ...templateCommands, ...lessonCommands, ...moreCommands };
+commands.boxes = commands.steps; // the old name
 
 // ---------- main ----------
 
@@ -46,7 +47,7 @@ try {
   if (!config.itpRoot && name !== 'help') {
     fail(`Orchestra does not know your ITP folder yet. Run: node ${path.join(config.root, 'bin', 'orch.mjs').replace(/\\/g, '/')} setup --itp <your ITP folder>`);
   }
-  const out = await withRunner((r) => cmd(r, { pos, opt }));
+  const out = await withRunner((r) => cmd(r, { pos, opt }), { archived: true });
   process.stdout.write((json ? JSON.stringify(out.json, null, 1) : out.text) + '\n');
   process.exit(0);
 } catch (err) {

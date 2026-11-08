@@ -1,5 +1,5 @@
 // The app, one run at a time: node bin/app.mjs <command>
-// A run's Claude calls this from its "Test in the app" step (the orchestra-app-test skill), inside its own workspace.
+// A run's Claude calls this from its "Test in the app" step (the app-test skill), inside its own workspace.
 // Only one copy of the ITP app can run (fixed ports), so runs wait in line for it, first come first served.
 // Outside a run (orch app start|stop|restart|wait|logs|release), it is you: the app serves your own ITP checkout
 // (the setup's ITP folder), and you hold it until orch app stop. A run that has the app is never pushed out.

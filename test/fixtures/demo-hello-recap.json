@@ -2,8 +2,8 @@
   "id": "demo-hello-recap",
   "name": "Demo: hello then recap",
   "tracking": false,
-  "boxes": [
-    { "id": "hello", "skill": "orchestra-hello", "label": "Say hello", "waitAfter": false },
-    { "id": "recap", "skill": "orchestra-recap", "label": "Recap", "waitAfter": false }
+  "steps": [
+    { "id": "hello", "skill": "orchestra-hello", "label": "Say hello", "wait": false },
+    { "id": "recap", "skill": "orchestra-recap", "label": "Recap", "wait": false }
   ]
 }

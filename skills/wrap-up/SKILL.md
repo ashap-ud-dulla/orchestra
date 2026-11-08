@@ -1,5 +1,5 @@
 ---
-name: orchestra-wrap-up
+name: wrap-up
 description: Orchestra step "Wrap up", the last step of a run. Shows what is still waiting (vault commits not pushed, the ITP folder's Execution files, the epic, uncommitted work), lets the user pick which jobs to do (push the vault, close the epic, commit and push the ITP files), does them, and asks whether to clean up the run when its tab closes. Never assumes a PR. Use as the last Orchestra template step.
 ---
 

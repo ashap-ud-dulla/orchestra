@@ -90,7 +90,7 @@ Match what the user typed and skip the menu:
 3. **Check, then start.** Show `orch template show <template>` (the steps), say which repos it uses, and ask
    "Start N run(s)?" with options **Start** · **Change the steps first** · **Cancel**.
    - **Start**: `orch start <template> <ticket> <ticket> …` (add `--repos …` or `--base repo=branch` only if they asked).
-   - **Change the steps first**: `orch start … --draft`, then edit with `orch boxes <run> --set '<json list>'`
+   - **Change the steps first**: `orch start … --draft`, then edit with `orch steps <run> --set '<json list>'`
      (keep finished steps first), then `orch reopen <run>` to start it.
 4. Tickets picked from Jira: set each run's About line from its Jira title right away:
    `orch about <key> "<title>"`.
@@ -128,14 +128,14 @@ any more: it stops what still runs from the run's folder (the app too), removes 
 worktree records, and removes the run's Claude conversation files. It keeps the run's notes, log and stats, and its
 branches. A cleaned run leaves the board (`orch runs --all` still shows it) and cannot be reopened.
 
-- **The usual way: the Wrap up step.** A template whose last step is `orchestra-wrap-up` wraps up in the run's own
+- **The usual way: the Wrap up step.** A template whose last step is `wrap-up` wraps up in the run's own
   tab: the user types `next` when ready; the step shows what is waiting (vault commits, the ITP folder's
   `Execution/` files, the epic, uncommitted work), the user ticks the jobs (push the vault, close the epic, commit +
   push the ITP files; a PR is never assumed), then picks **Yes, clean** · **Keep the folder** · **Not yet**. With
   Yes, closing the tab cleans the run up by itself (and deletes branches git sees as merged). Pushing the vault and
   the ITP folder to `main` works only inside that step, after the user's Allow.
-  To add it: `orch template add <id> orchestra-wrap-up --label "Wrap up"`, with wait on for the step before it.
-  A run started before the step was added: `orch boxes <run> --set '<json list>'` can add it (keep finished steps).
+  To add it: `orch template add <id> wrap-up --label "Wrap up"`, with wait on for the step before it.
+  A run started before the step was added: `orch steps <run> --set '<json list>'` can add it (keep finished steps).
 - **What takes space**: `orch disk` (each run folder and the total).
 - **One run** with no Wrap up step, or kept (its tab must be closed): `orch clean <ticket>`. It does no vault, epic or
   ITP job; for those, the run's own tab (Wrap up) is the place.
@@ -156,15 +156,15 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
   Find skill names with `orch skills <words>` when unsure. Show the result with `orch template show <id>`.
 - **Change a template**: turn their words into commands, one change at a time, and show the template after:
   `template add` (`--at N` for a place), `template remove <id> <step>`, `template move <id> <step> <position>`,
-  `template box <id> <step> wait=on|off app=on|off explain=on|off label="…" args="…"`,
+  `template step <id> <step> wait=on|off app=on|off explain=on|off label="…" args="…"`,
   `template set <id> name="…" tracking=on|off repos=api,webclient`, `template copy <id> <new-id>`, `template delete <id>` (ask first).
 - Step options in plain words: **wait** = stop after this step until the user types `next`; **app** = this step starts
   the app (one run at a time); **explain** = after this step, walk the user through the code changes.
 - **New conversation per step** (`fresh=on`): the step starts a new conversation instead of carrying the whole
   history (the biggest cost: every request re-reads it). It gets a short story of the earlier steps; plans, epics
   and code are on disk. Good for steps that read from disk (Build, code review, Wrap up); not for a step that needs
-  the talk before it (a plan right after its grill). `template box <id> <step> fresh=on|off`.
-- **Model and effort per step**: `template box <id> <step> model=opus|sonnet|haiku|fable|none effort=low|medium|high|xhigh|max|ultracode|none`
+  the talk before it (a plan right after its grill). `template step <id> <step> fresh=on|off`.
+- **Model and effort per step**: `template step <id> <step> model=opus|sonnet|haiku|fable|none effort=low|medium|high|xhigh|max|ultracode|none`
   (`template set <id> model=… effort=…` sets the template's default; `template add … --model … --effort …`).
   A step with none keeps the one before. When the next step wants another model or effort, Orchestra restarts the
   run's claude in the same tab, on the same conversation (a few seconds; changing the model re-reads the chat once at
@@ -175,13 +175,13 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
   there does both at once.
   **Ultracode** = many helper agents for one step: deep but costly (one small job used ~400k tokens). Turn it on only
   for the step the user names, and say the cost in one line.
-- **Bug template** (`bug-template`): step 1 `orchestra-bug-logs` reads the ticket, asks for the environment and time if
+- **Bug template** (`bug-template`): step 1 `bug-logs` reads the ticket, asks for the environment and time if
   missing, searches the ITP logs (OpenSearch, read only, names and ids hidden) and traces the error into
   `.orchestra-bug/trace.md`; the user checks "Is this the bug?". Then the feature flow plans and builds the fix.
   Start: `orch start bug-template <ticket>`.
 - **Tracking off** = the run may not call Teamspace or write the vault; such a template refuses skills that do.
-- **Testing in the app**: add the step `orchestra-app-test` after the build, with wait on:
-  `orch template add <id> orchestra-app-test --wait --label "Test in the app"` (only when the user asks for it).
+- **Testing in the app**: add the step `app-test` after the build, with wait on:
+  `orch template add <id> app-test --wait --label "Test in the app"` (only when the user asks for it).
   Do not mark it `app`: the step takes the app itself, only when it is ready to start it, and runs wait in line
   (first come, first served). It asks the user for the test data, tests the ticket, fixes up to 2 rounds, and keeps
   the app until the user types `next`. Suggest turning `app` off on build steps (`execute-epics` never starts the app),
@@ -247,7 +247,7 @@ Ask: **Lessons** · **Stats** · **Settings**.
     **Accept, change later** · **Reject**. The first is `orch suggestion <id> accept --apply`; accepting alone changes
     nothing in the template. If the template it came from is gone (renamed), add `--template <id>` (ask which).
   - A workflow change with no saved change (`(none saved…)`): turn its text into a change and show it before applying:
-    `orch suggestion <id> apply --change '{"op":"box","box":"<step id>","args":"…"}'` (ops: box with wait/app/explain
+    `orch suggestion <id> apply --change '{"op":"step","step":"<step id>","args":"…"}'` (ops: step with wait/app/explain
     on|off, args, label · add with skill, at, label, wait · remove · move with to).
   - `orch suggestions` also lists "Accepted, not in the template yet": offer to apply those (`orch suggestion <id> apply`).
   To look for lessons in one run now: `orch lessons <ticket>`.

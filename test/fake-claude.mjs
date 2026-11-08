@@ -14,7 +14,7 @@ fs.appendFileSync('fake-calls.log', JSON.stringify({ prompt: prompt.slice(0, 200
 out({ type: 'system', subtype: 'init', session_id: sessionId, cwd: process.cwd() });
 
 const text = prompt.startsWith('ORCHESTRA-LEARN')
-  ? 'Here you go:\n```json\n{"rules":[{"text":"Use blue for buttons.","why":"You picked blue at the gate."}],"workflow":[{"text":"Add a wait after Say hello.","why":"You stopped the run there.","change":{"op":"box","box":"hello","wait":"on"}},{"text":""}]}\n```'
+  ? 'Here you go:\n```json\n{"rules":[{"text":"Use blue for buttons.","why":"You picked blue at the gate."}],"workflow":[{"text":"Add a wait after Say hello.","why":"You stopped the run there.","change":{"op":"step","step":"hello","wait":"on"}},{"text":""}]}\n```'
   : 'OK.';
 out({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
 out({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed', session_id: sessionId, total_cost_usd: 0.01, result: text, usage: { input_tokens: 10, output_tokens: 5 } });

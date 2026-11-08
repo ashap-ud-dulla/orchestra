@@ -1,4 +1,4 @@
 {
-  "orchestra-wrap-up": "clean",
-  "orchestra-bug-logs": "clean"
+  "wrap-up": "clean",
+  "bug-logs": "clean"
 }

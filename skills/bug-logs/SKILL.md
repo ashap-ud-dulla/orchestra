@@ -1,5 +1,5 @@
 ---
-name: orchestra-bug-logs
+name: bug-logs
 description: Orchestra step "Find it in the logs", the first step of a bug run. Reads the bug ticket, finds the environment, client and time, searches the ITP logs (OpenSearch) with the team's read-only opensearch tools, traces the error the way the log-trace skill does, and shows the user what it found before the fix is planned. Replaces opening Kibana and pasting logs by hand. Use as an Orchestra template step.
 ---
 

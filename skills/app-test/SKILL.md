@@ -1,5 +1,5 @@
 ---
-name: orchestra-app-test
+name: app-test
 description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), hands the app to the user with an exact click path, and fixes what the user reports (2 rounds at most). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
 ---
 
@@ -46,7 +46,7 @@ needs, an exact click path, the logs read when something fails, and fixes.
 - **Which database: Global DB or Local DB.** Read which one is active now (see "Switching the database" below) and say
   it in the question. The user may need one for one check and the other for the next (for example the data of one
   project lives only on the Local DB). Projects, entities and forms differ between the two: tell the user that.
-- If the question dialog shows no text box for "Other", ask the open questions in plain chat instead and wait.
+- If the question dialog shows no text step for "Other", ask the open questions in plain chat instead and wait.
 
 ## Switching the database (Global DB / Local DB)
 
