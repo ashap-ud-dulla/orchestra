@@ -36,6 +36,8 @@ const baseEnv = (() => {
 // The tests' own personal skills folder, with the test skills (orchestra-hello, orchestra-recap). Never this PC's.
 const homeSkills = path.join(tmp, 'home-skills');
 fs.cpSync(path.join(ROOT, 'test/skills'), homeSkills, { recursive: true });
+// The ITP pack's Wrap up step, as setup installs it (templates in the tests use it).
+fs.cpSync(path.join(ROOT, 'packs/itp/skills/wrap-up'), path.join(homeSkills, 'wrap-up'), { recursive: true });
 let env;
 // The tests never use this PC's ITP folder: one of their own, with one team skill (a test that needs repos makes a
 // fake ITP with git repos).
@@ -43,7 +45,7 @@ const testItp = path.join(tmp, 'itp-base').replace(/\\/g, '/');
 fs.mkdirSync(path.join(testItp, '.claude', 'skills', 'review-changes'), { recursive: true });
 fs.writeFileSync(path.join(testItp, '.claude', 'skills', 'review-changes', 'SKILL.md'), '---\nname: review-changes\ndescription: a team skill\n---\nReview.\n');
 function useEnv(extra = {}) {
-  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
+  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_PACK: 'itp', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
 }
 useEnv();
 
@@ -1252,22 +1254,32 @@ test('app: health asks 127.0.0.1 first (the api listens on IPv4 only)', async ()
   }
 });
 
-test('setup: a fresh clone learns the ITP folder, gets the starter templates and its skills, and says what is missing', async () => {
+test('setup: a fresh clone learns the solution folder and its pack, gets the starter templates and its skills, and says what is missing', async () => {
   const home = path.join(tmp, 'fresh-home');
   const data = path.join(tmp, 'fresh-data');
-  const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '' } });
-  const none = await fresh('status');
+  const runsAt = path.join(tmp, 'fresh-runs');
+  const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: 'itp' } });
+  const plain = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: path.join(tmp, 'plain-data'), ORCHESTRA_HOME_SKILLS: path.join(tmp, 'plain-home'), ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: '' } });
+  const none = await plain('status');
   assert.notEqual(none.code, 0);
-  assert.match(none.err, /does not know your ITP folder yet\. Run: node .*bin\/orch\.mjs setup itp=/);
-  assert.match((await fresh('setup', '--itp', tmp)).err, /has no \.claude\/skills folder/);
+  assert.match(none.err, /Orchestra is not set up on this PC yet\. Run: node .*bin\/orch\.mjs setup solution=/);
+  assert.match((await plain('setup', 'solution=' + path.join(tmp, 'no-such-folder'))).err, /there is no folder/);
+  // No folder at all: it still works, with your own skills and no pack.
+  const bare = await plain('setup', 'worktrees=' + runsAt);
+  assert.equal(bare.code, 0, bare.err + bare.out);
+  assert.match(bare.out, /Solution folder: none[^]*Pack: none[^]*Run folders go in: .*fresh-runs[^]*orch: installed/);
+  assert.doesNotMatch(bare.out, /app-test/, 'no ITP skills without the ITP pack');
+  assert.equal((await plain('status')).code, 0);
+  assert.match((await plain('app')).err, /this solution has no app/);
   // The menu skill before it was /orch, installed by an older setup: removed (no run tab is open).
   fs.mkdirSync(path.join(home, 'orchestra'), { recursive: true });
   fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), '{}');
-  const s = await fresh('setup', 'itp=' + testItp, 'email=dev@example.com');
+  const s = await fresh('setup', 'itp=' + testItp, 'email=dev@example.com', 'worktrees=' + runsAt);
   assert.equal(s.code, 0, s.err + s.out);
   assert.match(s.out, /orchestra: old name, removed/);
   assert.ok(!fs.existsSync(path.join(home, 'orchestra')));
-  assert.match(s.out, /ITP folder: .*itp-base/);
+  assert.match(s.out, /Solution folder: .*itp-base[^]*Pack: itp/);
+  assert.match(fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8'), /# The ITP part \(the ITP pack\)/, 'the pack adds its part to /orch');
   assert.match(s.out, /dev@example\.com/);
   assert.ok(fs.existsSync(path.join(data, 'templates', 'feature-template.json')), 'starter templates copied');
   const skill = fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8');
@@ -1725,12 +1737,13 @@ test('workspace: worktrees start from the latest dev code with no branch; the br
 
 test('upgrade: a run and a template saved with the old words (boxes, waitAfter, orchestra-wrap-up) work, and save as version 2', async () => {
   // A template file from before: read as steps, the old skill name becomes the new one.
-  fs.writeFileSync(path.join(dataDir, 'templates', 'old-shape.json'), JSON.stringify({ id: 'old-shape', name: 'Old shape', tracking: false,
+  fs.writeFileSync(path.join(dataDir, 'templates', 'old-shape.json'), JSON.stringify({ id: 'old-shape', name: 'Old shape',
     boxes: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', waitAfter: true, usesApp: false, walkthrough: false }, { id: 'wrap', skill: 'orchestra-wrap-up', label: 'Wrap up' }] }));
   const shown = (await orchText('template', 'show', 'old-shape')).out;
   assert.match(shown, /1\. Say hello \[hello\] \/orchestra-hello · wait after/);
   assert.match(shown, /2\. Wrap up \[wrap\] \/wrap-up/);
-  assert.equal((await orchText('template', 'box', 'old-shape', 'hello', 'wait=off')).code, 0, 'the old "template box" still works');
+  const boxed = await orchText('template', 'box', 'old-shape', 'hello', 'wait=off');
+  assert.equal(boxed.code, 0, `the old "template box" still works: ${boxed.err}`);
   const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'templates', 'old-shape.json'), 'utf8'));
   assert.deepEqual([saved.version, !!saved.boxes, saved.steps.map((s) => s.skill), saved.steps[0].wait], [2, false, ['orchestra-hello', 'wrap-up'], false]);
   fs.rmSync(path.join(dataDir, 'templates', 'old-shape.json'));

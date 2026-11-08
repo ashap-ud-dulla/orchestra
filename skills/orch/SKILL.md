@@ -1,6 +1,6 @@
 ---
 name: orch
-description: Orchestra, the user's personal workflow runner, from the terminal. Start Jira tickets as runs (one terminal tab each), see the runs board, build templates from skills, find skills, lessons, stats and settings. Use when the user types /orch (with or without words after it) or asks to start tickets with a template, see their runs, reopen runs, or build a workflow template.
+description: Orchestra, the user's personal workflow runner, from the terminal. Start tickets or jobs as runs (one terminal tab each), see the runs board, build templates from skills, find skills, lessons, stats and settings. Use when the user types /orch (with or without words after it) or asks to start tickets with a template, see their runs, reopen runs, or build a workflow template.
 argument-hint: "[ticket | runs | run <ticket> | next | back <step> | model | steps | app | help]"
 allowed-tools: Bash(node {{ORCHESTRA}}/bin/orch.mjs *), AskUserQuestion, mcp__claude_ai_Atlassian__getAccessibleAtlassianResources, mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql
 ---
@@ -21,15 +21,16 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
 
 - Do all Orchestra work through `orch`. Never edit files under `orchestra/runs` or `orchestra/data` by hand, and never
   start `claude` yourself: `orch start` / `orch reopen` open the run tabs.
-- Never call Teamspace and never touch ITPKV from here. The runs do their own work in their own tabs.
+- The runs do their own work in their own tabs.
 - Show `orch` output as it comes (tables in a code block). Then add one or two plain, short sentences: what it means and
   what the user can do next. Simple words, short sentences.
 - Ask with **AskUserQuestion** (at most 4 options; the user can always type something else). Do not ask what the
   user already said.
 - If `orch` prints `Error: …`, say it plainly, and suggest the fix it names.
-- **First time on a PC**: `Error: Orchestra does not know your ITP folder yet`. Ask the user for their ITP workspace
-  folder (the one with `.claude/skills`, `ITP-API`, `ITP-WebClient`), then run `orch setup itp=<folder>` and show
-  what it prints (missing tools included). After a `git pull` of Orchestra, `orch setup` again refreshes the skills.
+- **First time on a PC**: `Error: Orchestra is not set up on this PC yet`. Ask the user for their solution folder (the
+  folder with their repos; it may also be one repo), or none. Then run `orch setup solution=<folder>` (or `orch setup`
+  with no folder: runs then work in your own skills only) and show what it prints: what it set up, what it changed on
+  the PC, missing tools. After a `git pull` of Orchestra, `orch setup` again refreshes the skills.
 - Each run opens its own tab in the **"orchestra"** Windows Terminal window (Alt+Tab). The user talks to the run there:
   `next` to go on (after a "wait for me" step, or with a step that was cut off), `redo` to run a step again,
   `skip` to move past an unfinished step on purpose, `/orch model opus effort=high` (or
@@ -86,8 +87,8 @@ Match what the user typed and skip the menu:
 ## Start run(s)
 
 1. **Template.** If they did not name one: run `orch templates` and ask which one (up to 4 as options).
-2. **Tickets or jobs.** If they gave none, offer their open Jira tickets (below). They can also type keys, links,
-   or a job in plain words instead. Each ticket or job makes one run.
+2. **Tickets or jobs.** If they gave none, offer their open tickets when the solution part below says how; else ask.
+   They can type keys, links, or a job in plain words. Each ticket or job makes one run.
    - A job with no ticket: quote it, one quoted text per run: `orch start <template> "Add a Sweden row" "Fix the legend"`
      (or `text="the job"` for one). Its tab is named after its first words; find it later by words (`orch run sweden`).
    - A text that only mentions a ticket ("same fix as ITP2-1, but for Sweden") is a job, not that ticket.
@@ -96,22 +97,9 @@ Match what the user typed and skip the menu:
    - **Start**: `orch start <template> <ticket> <ticket> …` (add `repos=…` or `base=repo=branch` only if they asked). A ticket that has a run already is refused: ask, then add `again=yes`.
    - **Change the steps first**: `orch start … draft=yes`, then edit with `orch steps <run> add|set|remove|move …` (below)
      (keep finished steps first), then `orch start <run>` to start it.
-4. Tickets picked from Jira: set each run's About line from its Jira title right away:
+4. Tickets picked from a ticket list: set each run's About line from its title right away:
    `orch about <key> "<title>"`.
 5. Show the result. Tell them the tabs open in the "orchestra" window, and how many work at once (the rest wait).
-
-### Your open Jira tickets
-
-Read only: never change a ticket from here.
-1. `searchJiraIssuesUsingJql` with cloudId `orbitax.atlassian.net`, jql
-   `assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`, maxResults 50, fields
-   `summary,status,issuetype`, responseContentFormat `markdown`. (If the cloudId is refused, get it once with
-   `getAccessibleAtlassianResources`.)
-2. Run `orch runs all --json` and mark the tickets that already have a run (their tab name is the key).
-3. Show a short table of the 10 most recently updated: key, title, status, "has a run". Then ask with
-   AskUserQuestion (multiSelect): the 4 newest tickets without a run as options; the user types other keys, or a
-   job in words, in "Other".
-5. No Jira connection, or the call fails: say so in one line, and ask for the keys or jobs as text.
 
 ## My runs
 
@@ -128,21 +116,20 @@ Read only: never change a ticket from here.
 ## Clean up
 
 Nothing is cleaned by itself: only when the user says so. A clean frees everything the run takes that is not needed
-any more: it stops what still runs from the run's folder (the app too), removes the folder (`C:/o/<n>`), tidies git's
+any more: it stops what still runs from the run's folder (the app too), removes the run folder, tidies git's
 worktree records, and removes the run's Claude conversation files. It keeps the run's notes, log and stats, and its
 branches. A cleaned run leaves the board (`orch runs all` still shows it) and cannot be reopened.
 
 - **The usual way: the Wrap up step.** A template whose last step is `wrap-up` wraps up in the run's own
-  tab: the user types `next` when ready; the step shows what is waiting (vault commits, the ITP folder's
-  `Execution/` files, the epic, uncommitted work), the user ticks the jobs (push the vault, close the epic, commit +
-  push the ITP files; a PR is never assumed), then picks **Yes, clean** · **Keep the folder** · **Not yet**. With
-  Yes, closing the tab cleans the run up by itself (and deletes branches git sees as merged). Pushing the vault and
-  the ITP folder to `main` works only inside that step, after the user's Allow.
+  tab: the user types `next` when ready; the step shows what is waiting (uncommitted work, branches not pushed, PR
+  links, and what the solution's pack adds), the user ticks the jobs (a PR is never assumed), then picks
+  **Yes, clean** · **Keep the folder** · **Not yet**. With Yes, closing the tab cleans the run up by itself (and
+  deletes branches git sees as merged).
   To add it: `orch steps <template> add wrap-up label="Wrap up"`, with `wait=on` for the step before it.
   A run started before the step was added: `orch steps <run> add wrap-up label="Wrap up"`.
 - **What takes space**: `orch disk` (each run folder and the total).
-- **One run** with no Wrap up step, or kept (its tab must be closed): `orch clean <ticket>`. It does no vault, epic or
-  ITP job; for those, the run's own tab (Wrap up) is the place.
+- **One run** with no Wrap up step, or kept (its tab must be closed): `orch clean <ticket>`. It does none of the Wrap up
+  jobs; for those, the run's own tab (Wrap up) is the place.
 - **Every finished run** (tabs closed): show `orch disk`, ask, then `orch clean done`.
 - **Runs left alone 7+ days** (listed by `orch status`): ask, then `orch clean stale`.
 - Uncommitted work: it refuses and names the files. Show them; add `force=yes` only after the user says so.
@@ -151,8 +138,7 @@ branches. A cleaned run leaves the board (`orch runs all` still shows it) and ca
 
 Ask: **New template** · **Change a template** · **Find skills** · **List templates**.
 
-- **Find skills**: `orch skills <words>`. The "Writes to Teamspace/vault" column matters for templates with tracking off.
-  To correct a wrong guess: `orch skill-mark <skill> writes|clean|auto`.
+- **Find skills**: `orch skills <words>`.
 - **New template**: ask for a short id (like `jira-to-pr`), a name, and the steps in plain words
   ("grill-itp, then plan-itp and wait for me, then execute-epics, it uses the app"). Then:
   `orch template new <id> <first-skill> name="Name" [tracking=off] [repos=api,webclient]`
@@ -179,67 +165,6 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
   there does both at once.
   **Ultracode** = many helper agents for one step: deep but costly (one small job used ~400k tokens). Turn it on only
   for the step the user names, and say the cost in one line.
-- **Bug template** (`bug-template`): step 1 `bug-logs` reads the ticket, asks for the environment and time if
-  missing, searches the ITP logs (OpenSearch, read only, names and ids hidden) and traces the error into
-  `.orchestra-bug/trace.md`; the user checks "Is this the bug?". Then the feature flow plans and builds the fix.
-  Start: `orch start bug-template <ticket>`.
-- **Tracking off** = the run may not call Teamspace or write the vault; such a template refuses skills that do.
-- **Testing in the app**: add the step `app-test` after the build, with wait on:
-  `orch steps <id> add app-test wait=on label="Test in the app"` (only when the user asks for it).
-  Do not mark it `app`: the step takes the app itself, only when it is ready to start it, and runs wait in line
-  (first come, first served). It asks the user for the test data, tests the ticket, fixes up to 2 rounds, and keeps
-  the app until the user types `next`. Suggest turning `app` off on build steps (`execute-epics` never starts the app),
-  so builds stop waiting for each other; change it only if the user says yes.
-- `orch app`: who has the app, who waits, whose code it serves. `orch app release <ticket>` takes it from a run
-  that is stuck. `orch status` shows an `App:` line when someone has it or waits for it.
-
-## The app for you
-
-The user can run the ITP app outside any run, from their own ITP checkout (the setup's ITP folder), with the same
-launcher as runs (AppHost by default, per-service logs in `<checkout>/.run-logs/`).
-
-- `orch app` first: who has it now (if a run has it, see below before asking anything).
-- **Ask which database, before every start: Global DB or Local DB.** Read which one is active now (see "The
-  database" below) and say it in the question, with the active one first. Ask also whether to add Outsider (usually no).
-  If the user picks the other DB, switch it before the start, so the app starts once on the right one.
-- **Ask about the Mission consumer too, in the same AskUserQuestion**, when the checkout has it (the folder
-  `{{ITP}}/ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer` exists; if not, do not ask).
-  Options: **No (usually)**, first · **Yes**: it is needed only to test XatBot / Mission work. No adds
-  `without=mission`: Orchestra then sends XatBot commands to Primary for this start (`ITP_MissionApis=","` in the
-  AppHost settings), so they do not hang; the user's Debug.json is not changed.
-- Then `orch app start` (give the Bash tool a 600000 ms timeout; add `minutes=9`). It prints the services, then
-  "The app is up …" with the Aspire dashboard line. Show it, and say which DB it runs on and whether Mission is on.
-  `with=outsider` adds Outsider; `without=mission` leaves Mission off; `services=webclient,api,…` sets the
-  whole list. `orch app restart` keeps the same services.
-- While the user has it, runs that want the app wait in line. Say so in one line.
-- **A run has the app**: the start is refused and names the run and what it does. Do not take it by yourself: offer
-  to wait, or `orch app release <ticket>` (it takes the app from that run, mid-step) only after the user says so.
-- "Not up yet": `orch app wait minutes=9`. Exit code 5 ("not started by Orchestra"): something else holds the ports
-  (the user's own app from Visual Studio, say). Show the processes and ask; `orch app start force=yes` only after yes.
-- `orch app logs [service]`, `orch app restart` (after a code change or a Debug.json switch), `orch app stop` (frees
-  it for runs). The first start in a checkout keeps the user's own AppHost settings in Orchestra's
-  `data/apphost-backups/` (never inside the ITP repo; its `appsettings.local.json` is gitignored there).
-- **Switching while the app runs** ("now Local DB"): switch as below, then `orch app restart minutes=9`, then tell
-  the user to reload the page (Ctrl+F5) and check the project picker.
-
-### The database (Global DB / Local DB)
-
-The same rules as the "Test in the app" step. The choice lives in the user's `Debug.json`: `ITP_DebugJsonPath` if set,
-else `C:\LocalStore\Debug.json` (ITP's default). It has two blocks of keys marked `// Global DB` and `// Local DB`;
-exactly one is active, the other is commented out with `//`. The keys are `MongodbConnection`, `MongodbDemoConnection`,
-`MongodbGlobalConnection`, `MongodbAppConnection` (Global block only), `DevPrefix` and `GlobalPrefix`. The .NET services
-read the file only when they start (the web app does not read it).
-
-- **Read the active DB without printing secrets:** say only which block has uncommented keys, and the host and prefix
-  values of its connection lines. Never show any other key of the file: it holds tokens and keys.
-- **Switch only after the user's yes**, each time: it is their own file, and the Global DB is a shared server. Show
-  the exact lines you will comment and uncomment first.
-- **Back up first:** copy it to `Debug.json.bak-before-<db>-switch-<date>` in the same folder.
-- **Edit only the two blocks:** comment the keys of the active block, uncomment the keys of the other one. Touch no
-  other line; keep the tabs.
-- Say afterwards which DB is active and where the backup is. Never switch back by yourself; offer it.
-- If the file has no `// Global DB` / `// Local DB` blocks, say so and do not edit it.
-
 ## More
 
 Ask: **Lessons** · **Stats** · **Settings**.
@@ -258,9 +183,7 @@ Ask: **Lessons** · **Stats** · **Settings**.
 - **Stats**: `orch stats`. Costs are estimates at API prices; on the Team plan they show usage, not a bill.
 - **Settings**: `orch settings` shows them. Change with `orch settings max=3 learn=on|off pane=on|off panesize=30`
   (max = runs working at once; learn = look for lessons after each run; pane = show the steps pane on the right of
-  each new run tab; panesize = its width in % of the tab, 15 to 70, for new tabs). `launcher=apphost|runstack` = how
-  the "Test in the app" step starts the ITP app: the Aspire AppHost (default: every host, Mission consumer and
-  Scheduler too) or run-stack.ps1 (old branches with no AppHost). Clean-up has no setting: it happens only when the user says so (**Clean up**).
+  each new run tab; panesize = its width in % of the tab, 15 to 70, for new tabs). Clean-up has no setting: it happens only when the user says so (**Clean up**).
 
 ## After a PC restart
 
@@ -268,3 +191,5 @@ Run tabs close with the PC. `orch status` shows "N stopped (reopen all)". Offer 
 on its own conversation. In each tab the user types `next`: a step that was cut off halfway (like a build) goes on
 from where it stopped; after a finished step, the next one starts. `redo` runs the step again from the start, and
 `skip` marks it done and moves past it (on purpose only).
+
+<!-- The solution's pack adds its own part below (orch setup). -->

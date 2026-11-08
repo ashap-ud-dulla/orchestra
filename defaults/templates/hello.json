@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "id": "hello",
+  "name": "Hello (check Orchestra works)",
+  "steps": [
+    { "id": "hello", "skill": "orch-hello", "label": "Say hello", "model": "haiku" }
+  ]
+}

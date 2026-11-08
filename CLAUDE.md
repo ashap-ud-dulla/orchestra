@@ -14,6 +14,13 @@ Orchestra only touches ITP in three ways:
 - **Any Windows PC**: no path, email or data of one PC in the code. `orch setup itp=<folder>` saves this PC's ITP
   folder and email (from git) in `data/settings.json`; `data/` is not in git (`defaults/` holds the starter templates).
   Tests make their own ITP folder and never read this PC's.
+- **Core + packs**: the core knows no solution. `packs/<name>/pack.mjs` adds one (repos, run rules, MCP lists,
+  vault folders, tracking, the app) plus its `skills/`, `templates/` and its part of `/orch` (`orch.md`). ITP is
+  `packs/itp`. The active pack: `ORCHESTRA_PACK`, else settings `pack` (setup saves it), else detected from the
+  solution folder. No pack: repos are found in the folder (the folder itself or its child repos), no app, no
+  tracking; the core starter skills (`orch-plan`, `orch-build`, `orch-review`, `wrap-up`, `orch-hello`) and
+  templates (`defaults/templates`). The guard still holds ITP's vault/Teamspace patterns: they only match ITP words.
+  `orch setup [solution=<folder>|none]`: the folder is optional. Tests run with `ORCHESTRA_PACK=itp`.
 - **Skills live in the repo** (`skills/`, with `{{ORCHESTRA}}` / `{{ITP}}` placeholders). `orch setup` installs them
   into `~/.claude/skills` with the paths filled in: edit `skills/`, then run `orch setup`, never the installed copies.
 - `/orch` (installed from `skills/orch`) is the front door: a menu plus shortcuts. It only calls
