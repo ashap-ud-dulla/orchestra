@@ -22,6 +22,7 @@ import { tabTitle } from '../lib/terminal.mjs';
 import { appPorts, readServing, writeServing, portOwners, processInfo, norm, stackPids, stopApp, brokersListening, readYourHold, writeYourHold, YOU, hostsIn } from '../lib/app.mjs';
 import { config } from '../lib/config.mjs';
 import * as launcher from '../lib/launcher.mjs';
+import { sleep, ordinal } from '../lib/util.mjs';
 
 const NOT_MINE = 5; // exit code: the app runs from somewhere Orchestra did not start it
 
@@ -42,7 +43,6 @@ const minutes = () => {
 };
 const runId = process.env.ORCHESTRA_RUN_ID;
 const token = process.env.ORCHESTRA_HOOK_TOKEN;
-const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 const say = (s) => process.stdout.write(s + '\n');
 
 function fail(message, code = 1) {
@@ -375,7 +375,7 @@ async function launch(actor, ws, how, services) {
     copier.unref();
     pids.push(copier.pid);
   }
-  writeServing({ runId: actor.id, title: actor.title, workspace: ws, branches: actor.branches, launcher: how, services, pids, startedAt: new Date().toISOString() });
+  writeServing({ runId: actor.id, title: actor.title, workspace: ws, branches: actor.branches, launcher: how, services, pids, startScript: cmd.script || null, startedAt: new Date().toISOString() });
   say(`Starting the app from ${ws} with ${how === 'apphost' ? 'the Aspire AppHost' : 'run-stack.ps1'}:`);
   for (const s of services) say(`  ${launcher.serviceLabel(s)}`);
   say('A cold start can take many minutes (the .NET services compile).');
@@ -388,10 +388,6 @@ function logNote(ws, serving) {
   if (files.length) return `Live logs: ${files.map((n) => `.run-logs/${n}.log`).join(', ')}`;
   if (serving?.launcher === 'apphost') return "Live logs: none yet. Orchestra copies each service's console from Aspire into .run-logs/ while the app runs; if they stay missing, the copier found no Aspire files: tell the user, and read the Aspire dashboard meanwhile.";
   return 'Live logs: none yet in .run-logs/.';
-}
-
-function ordinal(n) {
-  return `${n}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 }
 
 function appText(app, serving, h) {

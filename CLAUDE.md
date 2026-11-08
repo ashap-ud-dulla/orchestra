@@ -33,6 +33,12 @@ Orchestra only touches ITP in three ways:
   clean, closing the tab cleans up. Only while that step works (flag `runs/<id>/wrap-up.ok`) may the vault and the ITP
   folder push to `main`, after the user's Allow; in the ITP folder only `Execution/` files may be committed. This is
   the one exception to "never edit the itp-workspace repo". `orch clean` cleans runs without the step.
-- `node test/smoke.mjs` runs the tests with a fake `claude` (no tokens spent).
+- Code layout: `lib/runner.mjs` is the run state machine (hooks, steps moving on); its other jobs are part classes in
+  `lib/run/` (session, tab-commands, app-queue, cleanup, lessons) whose methods become Runner's own, plus helpers
+  (steps, prompts, pins, ship). `bin/orch.mjs` only dispatches: commands live in `lib/cli/` (runs, templates,
+  lessons, more), text in `lib/format.mjs`, the steps pane in `lib/pane.mjs`. Shared: `lib/util.mjs` (small
+  helpers), `lib/limits.mjs` (timings and caps), `lib/model.mjs` (model and effort words).
+- `node test/smoke.mjs` runs the tests with a fake `claude` (no tokens spent); `node test/smoke.mjs <words>` runs
+  only the tests whose name has one of the words.
 - Plans: `~/.claude/plans/you-know-my-workflow-floofy-lemon.md` (the 8 build steps),
   `~/.claude/plans/joyful-doodling-allen.md` (now: the "Test in the app" step and the app queue).

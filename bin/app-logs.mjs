@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dcpSessionFor } from '../lib/app.mjs';
 import { dcpResources, dcpLine, logNameOf, logsDir } from '../lib/launcher.mjs';
+import { sleep, alive } from '../lib/util.mjs';
 
 const ws = process.argv[2];
 const owner = Number(process.argv[3]) || 0;
@@ -15,15 +16,6 @@ if (!ws) {
   process.exit(1);
 }
 
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 let session = null;
 let lastLook = 0;

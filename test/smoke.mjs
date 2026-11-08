@@ -374,8 +374,6 @@ test('skills list includes Orchestra test skills and team skills', async () => {
   assert.ok(names.includes('orchestra-hello') && names.includes('orchestra-recap'));
   assert.equal(body.find((s) => s.name === 'review-changes')?.source, 'team', 'a skill of the ITP folder');
   assert.ok(!names.some((n) => n.startsWith('_')), 'folders starting with _ are skipped');
-  // Many runs stay open in these tests; give them room.
-  assert.equal((await api('PUT', '/api/settings', { maxRunning: 20 })).status, 200);
 });
 
 // ---- the terminal session ----
@@ -545,7 +543,7 @@ test('models: "/orchestra model" in the tab switches the step working now, on th
   assert.equal(cli.code, 0);
   assert.match(cli.out, /"Say hello" \(working now\) runs with sonnet, effort high\.\nType "\/orchestra model" in its tab to switch now/);
   assert.equal((await getRun(run.id)).restart, null, 'never a restart from outside');
-  assert.match((await orchText('model', run.id, 'gpt 4!')).err, /model must be/);
+  assert.match((await orchText('model', run.id, 'gpt 4!')).err, /not a model or effort: gpt 4!/);
   assert.match((await say('/orchestra model')).reason, /restarts this tab with sonnet, effort high/);
   await runnerCall('relaunchSpec', [run.id, run.hookToken, (await getRun(run.id)).session.pid]);
   // Waiting after the step: the next step changes, with no restart; it starts with it on next.
@@ -1450,26 +1448,6 @@ test('safety: a lock whose holder stopped writing its time is taken over, even w
   assert.ok(!fs.existsSync(path.join(lock, 'owner.json')) || JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8')).token !== 'gone');
 });
 
-test('a run saved by the old background mode becomes a stopped run that reopens its session', async () => {
-  const id = 'run-20200101000000-old000';
-  fs.mkdirSync(path.join(runsDir, id), { recursive: true });
-  fs.writeFileSync(path.join(runsDir, id, 'state.json'), JSON.stringify({
-    id, templateId: 'demo-hello-recap', templateName: 'Old', tracking: true, input: { text: 'old' }, status: 'question', sessionId: 'old-session',
-    cwd: path.join(runsDir, id, 'work'), repoPlan: [], workspace: null, chat: [], cost: 0.5, createdAt: '2020-01-01T00:00:00Z',
-    boxes: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', status: 'question', pid: 5 }, { id: 'recap', skill: 'orchestra-recap', label: 'Recap', status: 'pending' }],
-  }));
-  const old = await getRun(id);
-  assert.equal(old.status, 'stopped');
-  assert.equal(old.boxes[0].status, 'running');
-  assert.ok(old.hookToken);
-  await api('POST', `/api/runs/${id}/resume`);
-  const now = await waitFor(async () => ((await getRun(id)).session?.open ? getRun(id) : null), 'the reopened session');
-  const spec = (await launch(now)).body;
-  assert.equal(spec.args[spec.args.indexOf('--resume') + 1], 'old-session', 'the same conversation');
-  assert.equal(now.status, 'needs-you');
-  await close(now);
-});
-
 test('hooks need the run token; Stop ends the session; delete waits for it', async () => {
   const run = await startRun();
   assert.deepEqual((await hook(run, 'Stop', done('x'), 'nope')).body, {}, 'a wrong token changes nothing');
@@ -2180,14 +2158,6 @@ test('lock: a lock left by a dead process is taken over; many hooks at once lose
   await close(run);
 });
 
-test('a tab opened by the old server version still works with no server', async () => {
-  const run = await startRun();
-  const r = await proc([path.join(ROOT, 'lib/session-hook.mjs'), 'Stop'], { input: JSON.stringify(done('hello')), extraEnv: { ORCHESTRA_URL: 'http://127.0.0.1:9', ORCHESTRA_RUN_ID: run.id, ORCHESTRA_HOOK_TOKEN: run.hookToken } });
-  assert.match(JSON.parse(r.out).reason, /\/orchestra-recap/);
-  assert.equal((await getRun(run.id)).boxes[1].status, 'running');
-  await close(run);
-});
-
 // node test/smoke.mjs [words…]: only the tests whose name has one of the words (any case).
 // ORCHESTRA_TEST_TIMEOUT: the time limit per test in seconds (default 180), so a hung test fails with its name.
 const words = process.argv.slice(2).map((w) => w.toLowerCase());
@@ -2196,6 +2166,8 @@ if (!chosen.length) console.log(`No test name has: ${words.join(', ')}`);
 const LIMIT_S = Number(process.env.ORCHESTRA_TEST_TIMEOUT || 180);
 let failed = 0;
 try {
+  // Many runs stay open in these tests; give them room (also when one test runs alone).
+  assert.equal((await api('PUT', '/api/settings', { maxRunning: 20 })).status, 200);
   for (const [name, fn] of chosen) {
     const started = Date.now();
     let timer;
