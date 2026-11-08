@@ -1,44 +1,27 @@
 # Orchestra cheat sheet
 
-Remember two things: **`/orch`** in your main tab, **`next`** in a run's tab.
+Remember one thing: **`/orch`**, then say what you want in plain words. In a run's tab, just talk.
 
 ```
-Main tab: /orch  ──starts──►  "orchestra" window (Alt+Tab): one tab per ticket
-gives orders, shows the board      each run works there; right pane = its steps live
+Main tab: /orch …  ──opens──►  "orchestra" window (Alt+Tab): one tab per ticket
+                                  each run plans itself there; right pane = its steps live
 ```
-
-Options are always `key=value` (`wait=on`, `model=opus`, `force=yes`). A typo is answered with the right word.
-Everything: `/orch help`.
 
 ## Main tab (any Claude Code tab)
 
-| Want | Type |
+| Want | Say |
 |---|---|
-| Status + menu | `/orch` |
-| Start tickets or work orders | `/orch start feature-template ITP2-15001 TSP-W-001` |
-| Pick from what you hold | `/orch start feature-template` (no key): the run's first step lists your work orders and tickets |
-| Start a client bug | `/orch start bug-template ITP2-15003` (it searches the logs itself) |
-| Start a job with no ticket | `/orch start feature-template "Add a Sweden row"` (quoted) |
-| A ticket that has a run already | add `again=yes` |
-| Board (who needs you first) | `/orch runs` (`/orch runs all`: cleaned runs too) |
-| One run | `/orch run 14877` (short) · `/orch run 14877 full=yes` (notes, PR links, activity) |
-| Go on / skip / redo from here | `/orch next 14877` · `/orch skip 14877` · `/orch redo 14877` |
-| Its steps | `/orch steps 14877` · `… add app-test after=build wait=on` · `… set review model=opus` · `… remove 5` · `… move review to=3` |
-| A template's steps | the same: `/orch steps feature-template …` |
-| Go to a step (back or forward) | `/orch go 14877 build fix the review findings` |
-| Hand over / push the vault now | `/orch go 14877 wrap-up handing over to Samiul` (skips the steps between) |
-| Model of the step now | `/orch model 14877 opus effort=high` |
-| Who has the app | `/orch app` |
-| Reopen tabs (after a restart) | `/orch reopen all` · `/orch reopen 14929` |
-| Stop a run | `/orch stop 14877` |
-| Space used | `/orch disk` |
-| Clean one run (tab closed) | `/orch clean 14929` |
-| Clean all finished runs | `/orch clean done` |
-| Find skills | `/orch skills review` |
-| Lessons to say yes/no to | `/orch suggestions` |
-| Spend and stats | `/orch stats` |
+| Start work | `/orch ITP2-15005, TSP-W-001, CLIS-688` (paste keys, links, or "a job in words") |
+| Pick from what you hold | `/orch` → "Work on something new?" → yes: the run's first step lists your work orders and tickets |
+| What's going on | `/orch` · `/orch what needs me?` · `/orch how is ITP2-14941?` |
+| Move a run | `/orch go back to build on ITP2-14941, the review found a null check` · `/orch skip to wrap up on CLIS-688` |
+| Hand over | `/orch hand CLIS-688 to Samiul` (it skips to Wrap up, which writes a handover note) |
+| More at once | `/orch run up to 5 heavy steps at once` |
+| Clean up | `/orch free some space` · `/orch clean my finished runs` |
 
-Three runs work at once (`/orch settings max=2` to change). The rest wait in line and start by themselves.
+**Each run plans itself.** Its first step reads the task (work order, Jira or your words), suggests the steps (your
+template that fits, changed for this task, heavy steps marked, about $ and hours), and asks. Change them in plain
+words. Every run opens at once; only heavy steps (builds, the app) wait for a free slot.
 
 ## Run tab
 

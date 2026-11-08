@@ -43,9 +43,16 @@ Orchestra only touches ITP in three ways:
 - `go` (also back, jump): moves a run to any step on its own steps (no copies). Back resets that step and the ones
   after it to pending, keeping each one's earlier results in `step.tries`; forward marks the steps between `skipped`
   (status; `PASSED` = done or skipped in `lib/run/steps.mjs`) and tells the step (`jumpedOver`, `why`).
-- Intake: the first step of a run (`intake`; the ITP pack's reads Teamspace Work Orders, read only) picks the task
-  (Work Order, Jira, words; nothing given: lists what the user holds), writes `.orchestra/task.md` and ends with
-  `ORCHESTRA:TASK <KEY> | title` (`run.task`; `ticketKey` prefers it). `/orch` itself never calls Teamspace.
+- One `/orch` + plain words. `orch start <keys…>` with no template makes runs whose only step is `intake` ("Pick the
+  task and the steps"; the ITP pack's reads Teamspace Work Orders, read only): it reads the task into
+  `.orchestra/task.md`, suggests a template changed for the task (heavy steps, cost/time from `orch stats`, overlap
+  with other runs), asks, and puts the steps in itself with `orch use this <template>` / `orch steps this …` (`this` =
+  the tab's run, checked by its token; these and read-only commands are pre-allowed in run sessions, `RUN_ORCH`). It
+  ends with `ORCHESTRA:TASK <KEY> | title` (`run.task`; `ticketKey` prefers it) and `ORCHESTRA:PLAN suggested | chosen`
+  (`run.plan`, lesson material). `/orch` itself never calls Teamspace.
+- Heavy steps: every run opens its tab at once; only heavy steps (`step.heavy`, or the skill marked heavy in
+  `data/heavy-marks.json`, `isHeavy`) wait for one of `maxRunning` slots (`slotNext`, `startSlotWaiters`, like the app
+  queue).
 - Plain words in a run tab: the run's Claude ends its reply with `ORCHESTRA:DO <command>` (what follows `/orch`);
   the Stop hook runs it as if typed (`doAsked`).
 - App queue: a step that needs the app while another run has it never blocks a hook: the run waits (`appNext`), its

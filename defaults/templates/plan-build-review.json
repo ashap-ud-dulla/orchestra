@@ -4,16 +4,6 @@
   "name": "Plan, build, review",
   "steps": [
     {
-      "id": "intake",
-      "skill": "intake",
-      "label": "Pick the task",
-      "wait": false,
-      "app": false,
-      "explain": false,
-      "model": "sonnet",
-      "effort": "medium"
-    },
-    {
       "id": "plan",
       "skill": "orch-plan",
       "label": "Plan",
@@ -26,7 +16,8 @@
       "label": "Build",
       "wait": false,
       "fresh": true,
-      "model": "sonnet"
+      "model": "sonnet",
+      "heavy": true
     },
     {
       "id": "review",

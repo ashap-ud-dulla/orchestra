@@ -8,16 +8,6 @@
   ],
   "steps": [
     {
-      "id": "intake",
-      "skill": "intake",
-      "label": "Pick the task",
-      "wait": false,
-      "app": false,
-      "explain": false,
-      "model": "sonnet",
-      "effort": "medium"
-    },
-    {
       "id": "grill-itp",
       "skill": "grill-itp",
       "label": "grill-itp",
@@ -71,7 +61,8 @@
       "explain": false,
       "model": "sonnet",
       "effort": "high",
-      "fresh": true
+      "fresh": true,
+      "heavy": true
     },
     {
       "id": "test-in-the-app",
@@ -80,7 +71,8 @@
       "args": "",
       "wait": true,
       "model": "sonnet",
-      "effort": "high"
+      "effort": "high",
+      "heavy": true
     },
     {
       "id": "ai-itp-code-reviewer",

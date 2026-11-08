@@ -8,6 +8,18 @@ description: Orchestra step "Wrap up", the last step of a run. Shows what is sti
 You are the last step of an Orchestra run, in the run's own terminal tab. The user decides everything here: look,
 show, ask, then do only what they pick.
 
+## 0. Handing over?
+
+If Orchestra's prompt says the user went straight to this step to hand the work over (a reason like "handing over
+to Samiul"), first write `.orchestra/handover.md` and show it, so the user can paste it to that person:
+- **The task**: its key and title, in one line (from `.orchestra/task.md` when it is there).
+- **What was found**: the cause, the trace, the decisions so far (from the steps' notes and the files on disk).
+- **What is done**: the steps that finished, and what each left (plan, epic, code on which branch, tests).
+- **What is left**: the steps that were skipped, and anything open.
+- **Where things are**: branches and PR links, the epic folder, notes and trace files.
+
+Never post it anywhere by yourself (no Jira or Teamspace comment). Then go on with the usual jobs below.
+
 ## 1. Look
 
 In each repo of the run (the worktrees in the current folder):

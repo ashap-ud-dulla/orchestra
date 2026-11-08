@@ -1,7 +1,7 @@
 ---
 name: orch
 description: Orchestra, the user's personal workflow runner, from the terminal. Start tickets or jobs as runs (one terminal tab each), see the runs board, build templates from skills, find skills, lessons, stats and settings. Use when the user types /orch (with or without words after it) or asks to start tickets with a template, see their runs, reopen runs, or build a workflow template.
-argument-hint: "[ticket | runs | run <ticket> | next | go <step> | model | steps | app | help]"
+argument-hint: "[tickets or work orders to start | or anything in plain words]"
 allowed-tools: Bash(node {{ORCHESTRA}}/bin/orch.mjs *), AskUserQuestion, mcp__claude_ai_Atlassian__getAccessibleAtlassianResources, mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql
 ---
 
@@ -52,58 +52,47 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
   drag selects text. From here: `orch pin <ticket>` (shows the pins in full), `orch pin <ticket> "text"
   [title="…"]`, `orch unpin <ticket> [N|all]`.
 
-## No words after /orch: the menu
+## No words after /orch
 
-1. Run `orch status` and show it. If it has a "Left alone 7+ days" or "Finished, folder still there" line, offer
-   **Clean up** once in a short sentence (see **Clean up**); never clean without a yes.
-2. Ask "What do you want to do?" with these 4 options:
-   - **Start run(s)**: one or more tickets with a template
-   - **My runs**: the board, open a run, reopen, stop, clean up and free space
-   - **Templates & skills**: build or change a template, find skills
-   - **More**: lessons, stats, settings
-3. Go on with the matching section below.
+1. Run `orch status` and show it, then say in one or two lines what needs the user (a question, a `next`, an Allow).
+   If it has a "Left alone 7+ days" or "Finished, folder still there" line, offer **Clean up** once (see **Clean up**).
+2. Ask **Work on something new?** with **Yes** · **No**. Yes: `orch start` (no words): one run opens, and its first step
+   lists the Work Orders and tickets the user holds, in its tab, where they pick. Say so in one line.
 
-## Words after /orch: shortcuts
+## Words after /orch: plain words
 
-Match what the user typed and skip the menu:
+The user remembers nothing but `/orch`. Read what they wrote and do it with `orch`:
 
-| They typed | Do |
+| They say | Do |
 |---|---|
-| `start …`, or ticket keys / Jira links | **Start run(s)**, with what they gave |
-| `runs`, `board` | `orch runs` |
-| `run <ticket or words>` | `orch run <ticket or words>` (a run is found by its Jira key, words from its name, or its id end) |
-| `reopen all`, `reopen <ticket>` | `orch reopen …` |
-| `stop / delete <ticket>` | the same `orch` command (ask before `delete`) |
-| `clean …`, `disk`, "free space" | **Clean up** |
-| `templates`, `template …` | **Templates & skills** |
-| `skills <words>` | `orch skills <words>` |
-| `learn`, `lessons` | **Lessons** |
-| `stats` | `orch stats` |
-| `go <ticket> <step> …`, `back …`, "go back to build", "start again from step 5", "skip to wrap up", "hand it over" | `orch go <ticket> <step> [why]`. With the tab open and Claude idle it starts at once; while Claude works it is refused (then: `/orch go <step> why` in the tab); with the tab closed the run moves and the step starts after `orch reopen` + `next`. Going forward skips the steps between: say so in one line first. No ticket: ask which run. |
-| `model <ticket> …`, "use opus for this step" | `orch model <ticket> <model> [effort=…]` (see **Templates & skills**). No ticket: ask which run (`orch runs`). |
-| `next / skip / redo <ticket>` | the same `orch` command: like typing it in the run's tab (its claude restarts on the same conversation to get it). It refuses while the run works or waits at an Allow prompt: say so. |
-| `steps <ticket or template> …` | `orch steps … [show|add|set|remove|move]`: the same verbs for a run and a template |
-| `help` | `orch help`, shown as it comes |
-| `app`, "start / stop / restart the app", "app logs" | **The app for you** |
-| `settings …` | `orch settings …` |
-| anything else | read it as a plain request and pick the closest section |
+| Keys or links, pasted (`ITP2-15005, TSP-W-001, CLIS-688`), or jobs in words | **Start run(s)** below |
+| "what's running", "what needs me", "board" | `orch status` / `orch runs` |
+| "how is ITP2-1", "what did CLIS-688 find" | `orch run <ticket>` (`full=yes` for every note) |
+| "go back to build on ITP2-1", "start again from step 5", "skip to wrap up", "hand ITP2-1 to Samiul", "wrap up CLIS-688" | `orch go <ticket> <step> [why]` (a hand-over or a wrap-up is `go <ticket> wrap-up <why>`). Going forward skips the steps between, and going back runs them again: say which in one line and ask first. It starts at once when Claude in that tab is idle; while it works, say to type it in the tab |
+| "next / skip / redo on ITP2-1" | `orch next|skip|redo <ticket>` |
+| "use opus for ITP2-1" | `orch model <ticket> opus [effort=…]` |
+| "change the steps of …", "add a code review to …" | `orch steps <ticket or template> add|remove|set|move …` (show the result) |
+| "reopen", "after a restart" | `orch reopen all` / `orch reopen <ticket>` |
+| "stop", "delete" | the same `orch` command (ask before `delete`) |
+| "clean", "free space", "disk" | **Clean up** |
+| templates, skills | **Templates & skills** |
+| lessons, stats, settings ("run up to 5 at once" = `orch settings max=5`) | **More** |
+| the app | **The app for you** |
+| "help" | `orch help` |
+
+When unsure what they mean, ask one short question with options.
 
 ## Start run(s)
 
-1. **Template.** If they did not name one: run `orch templates` and ask which one (up to 4 as options).
-2. **Tickets or jobs.** They can give keys (a Jira key, a Work Order key like `TSP-W-001`), links, or a job in plain
-   words; each makes one run. **None given** ("start my next work order", "pick a task"): start ONE run with no task
-   (`orch start <template>`): its first step, **Pick the task** (`intake`), shows in its tab the Work Orders and
-   tickets the user holds and they pick there. Do not list tickets here.
-   - A job with no ticket: quote it, one quoted text per run: `orch start <template> "Add a Sweden row" "Fix the legend"`
-     (or `text="the job"` for one). Its tab is named after its first words; find it later by words (`orch run sweden`).
-   - A text that only mentions a ticket ("same fix as ITP2-1, but for Sweden") is a job, not that ticket.
-3. **Check, then start.** Show `orch template show <template>` (the steps), say which repos it uses, and ask
-   "Start N run(s)?" with options **Start** · **Change the steps first** · **Cancel**.
-   - **Start**: `orch start <template> <ticket> <ticket> …` (add `repos=…` or `base=repo=branch` only if they asked). A ticket that has a run already is refused: ask, then add `again=yes`.
-   - **Change the steps first**: `orch start … draft=yes`, then edit with `orch steps <run> add|set|remove|move …` (below)
-     (keep finished steps first), then `orch start <run>` to start it.
-5. Show the result. Tell them the tabs open in the "orchestra" window, and how many work at once (the rest wait).
+1. **Each key or quoted job makes one run** (split pasted lists on commas, spaces or lines). Keys: a Jira key, a Work
+   Order key (`TSP-W-001`), a link. A job in words is quoted: `"Add a Sweden row"`. A text that only mentions a ticket
+   ("same fix as ITP2-1, but for Sweden") is a job, not that ticket.
+2. **No template needed**: `orch start <keys…>`. Each run's first step, **Pick the task and the steps**, reads its
+   task, suggests the steps that fit (one of the user's templates, changed for it, with a cost and time estimate) and
+   asks, in the run's tab. Only when the user names a template: `orch start <template> <keys…>`.
+3. A ticket that has a run already is refused: ask, then add `again=yes`.
+4. Show the result in one or two lines: every run opens its tab now in the "orchestra" window; heavy steps (builds,
+   the app) work a few at a time (`orch settings` shows how many) and the others wait and start by themselves.
 
 ## My runs
 
@@ -186,7 +175,7 @@ Ask: **Lessons** · **Stats** · **Settings**.
   To look for lessons in one run now: `orch lessons <ticket>`.
 - **Stats**: `orch stats`. Costs are estimates at API prices; on the Team plan they show usage, not a bill.
 - **Settings**: `orch settings` shows them. Change with `orch settings max=3 learn=on|off pane=on|off panesize=30`
-  (max = runs working at once; learn = look for lessons after each run; pane = show the steps pane on the right of
+  (max = heavy steps (builds, the app) working at once; every run opens and talks at once; learn = look for lessons after each run; pane = show the steps pane on the right of
   each new run tab; panesize = its width in % of the tab, 15 to 70, for new tabs). Clean-up has no setting: it happens only when the user says so (**Clean up**).
 
 ## After a PC restart

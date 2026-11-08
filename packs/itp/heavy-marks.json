@@ -1,0 +1,4 @@
+{
+  "execute-epics": "heavy",
+  "app-test": "heavy"
+}

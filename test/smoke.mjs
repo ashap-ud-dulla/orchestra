@@ -680,6 +680,50 @@ test('intake: a run started with nothing takes the key its first step picks (a w
   await close(run);
 });
 
+test('no template: pasted keys each open a run whose first step picks the task and the steps, and puts them in with "this"', async () => {
+  // intake, as setup installs it (the core version).
+  fs.cpSync(path.join(ROOT, 'skills/intake'), path.join(homeSkills, 'intake'), { recursive: true });
+  const out = await orch('start', 'ITP2-9101,', 'TSP-W-9102');
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  const runs = out.body;
+  assert.deepEqual(runs.map((r) => [r.input.text, r.templateId, r.steps.map((s) => s.skill).join()]), [['ITP2-9101', null, 'intake'], ['TSP-W-9102', null, 'intake']]);
+  const run = await waitFor(async () => { const r = await getRun(runs[0].id); return r.session?.open ? r : null; }, 'its tab to open');
+  await waitFor(async () => (await getRun(runs[1].id)).session?.open, 'every tab opens at once');
+  await hook(run, 'SessionStart', { session_id: run.sessionId, source: 'startup' });
+  const spec = (await launch(await getRun(run.id), fakeLauncher())).body;
+  assert.equal(spec.args.at(-1), '/intake ITP2-9101');
+  const settings = JSON.parse(spec.args[spec.args.indexOf('--settings') + 1]);
+  assert.ok(settings.permissions.allow.some((r) => /orch\.mjs use this:\*\)$/.test(r)), 'its own-run commands need no Allow');
+  assert.ok(!settings.permissions.allow.some((r) => /orch\.mjs (delete|clean|stop)/.test(r)));
+  // "this" is the run of the tab: only with its own token.
+  const asRun = (...a) => proc([path.join(ROOT, 'bin/orch.mjs'), ...a], { extraEnv: { ORCHESTRA_RUN_ID: run.id, ORCHESTRA_HOOK_TOKEN: run.hookToken } });
+  assert.match((await orchText('use', 'this', 'demo-hello-recap')).err, /"this" works only inside a run's tab/);
+  let r = await asRun('use', 'this', 'demo-hello-recap');
+  assert.equal(r.code, 0, r.err);
+  let now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.skill), ['intake', 'orchestra-hello', 'orchestra-recap']);
+  assert.equal(now.templateId, 'demo-hello-recap');
+  r = await asRun('steps', 'this', 'set', 'hello', 'heavy=on');
+  assert.equal(r.code, 0, r.err);
+  assert.equal((await getRun(run.id)).steps[1].heavy, true);
+  r = await asRun('template', 'from', 'this', 'mine-from-run', 'name=Mine');
+  assert.equal(r.code, 0, r.err);
+  const saved = (await orch('template', 'show', 'mine-from-run')).body;
+  assert.deepEqual([saved.name, saved.steps.map((s) => s.skill), saved.steps[0].heavy], ['Mine', ['orchestra-hello', 'orchestra-recap'], true]);
+  fs.rmSync(path.join(dataDir, 'templates', 'mine-from-run.json'));
+  // Heavy marks per skill.
+  assert.equal((await orchText('skill-mark', 'orchestra-recap', 'light')).code, 0);
+  assert.match((await orchText('skills', 'orchestra-recap')).out, /orchestra-recap\s+\S+\s+light/);
+  // The first step ends: the run takes the key; the plan it chose is kept for the lessons; the next step starts.
+  const end = await hook(run, 'Stop', done('picked\nORCHESTRA:TASK ITP2-9101 | Fix the row\nORCHESTRA:PLAN suggested: Say hello > Recap | chosen: Say hello > Recap > Extra'));
+  now = await getRun(run.id);
+  assert.deepEqual(now.plan && [now.plan.suggested, now.plan.chosen], ['Say hello > Recap', 'Say hello > Recap > Extra']);
+  assert.match(end.body.output.reason, /\/orchestra-hello/);
+  const { material } = await import('../lib/learn.mjs');
+  assert.match(material(now), /suggested the steps Say hello > Recap; you changed them to Say hello > Recap > Extra/);
+  for (const x of runs) await close(await getRun(x.id));
+});
+
 test('go from outside: a working run is refused; a waiting one starts at once; a step working now is skipped when you jump', async () => {
   const run = await startRun([{ id: 'a', skill: 'orchestra-hello', wait: true }, { id: 'b', skill: 'orchestra-recap' }, { id: 'c', skill: 'orchestra-hello' }]);
   await launch(run, fakeLauncher());
@@ -1607,21 +1651,26 @@ test('hooks need the run token; Stop ends the session; delete waits for it', asy
   assert.equal((await api('GET', `/api/runs/${run.id}`)).status, 404);
 });
 
-test('the queue: only the limit works at once, first in first out; a queued run can be taken out', async () => {
+test('heavy steps: every run opens at once; only the limit of heavy steps work at once, first come first served', async () => {
   await api('PUT', '/api/settings', { maxRunning: 1 });
   try {
-    for (const r of (await api('GET', '/api/runs')).body) if (r.status === 'running') await close(r);
-    const a = await startRun();
-    const ids = [];
-    for (const t of ['q1', 'q2']) ids.push((await api('POST', '/api/runs', { templateId: 'demo-hello-recap', input: { text: t } })).body.id);
-    assert.deepEqual(await Promise.all(ids.map(async (id) => (await getRun(id)).status)), ['queued', 'queued']);
-    assert.equal((await api('POST', `/api/runs/${ids[1]}/stop`)).body.status, 'stopped', 'taken out of the queue');
-    // A run that waits for you frees its slot.
-    await hook(a, 'Stop', say('A question?'));
-    await waitStatus(ids[0], 'running');
-    assert.equal((await getRun(ids[1])).status, 'stopped');
-    await close(await getRun(ids[0]));
-    await close(a);
+    for (const r of (await api('GET', '/api/runs')).body) if (r.status === 'running' && r.session?.open) await close(r);
+    const a = await startRun([{ id: 'build', skill: 'orchestra-hello', heavy: true }]);
+    assert.equal((await getRun(a.id)).steps[0].status, 'running', 'a heavy step works');
+    // A second run opens at once and talks; only its heavy step waits for the slot.
+    const b = await startRun([{ id: 'talk', skill: 'orchestra-recap' }, { id: 'build', skill: 'orchestra-hello', heavy: true }]);
+    assert.equal((await getRun(b.id)).steps[0].status, 'running', 'a talking step never waits');
+    const said = (await hook(b, 'Stop', done('talked'))).body.output;
+    assert.match(said.systemMessage, /Waiting for a free slot: demo is doing heavy steps \(1 at a time\)\. "orchestra-hello" starts by itself/);
+    let now = await getRun(b.id);
+    assert.deepEqual([now.status, now.steps[1].status, now.slotNext.step], ['waiting', 'pending', 'build']);
+    assert.match((await orchText('runs')).out, /waits for a slot/);
+    // The slot frees up: b's heavy step starts by itself (its idle claude restarts on the same conversation).
+    await hook(a, 'Stop', done('built'));
+    now = await waitFor(async () => { const r = await getRun(b.id); return r.steps[1].status === 'running' ? r : null; }, 'b to start its heavy step');
+    assert.ok(now.restart && now.slotNext === undefined);
+    await close(await getRun(a.id));
+    await close(now);
   } finally {
     await api('PUT', '/api/settings', { maxRunning: 20 });
   }
@@ -1638,16 +1687,15 @@ test('several Jira tickets at once: one run each, in order; each tab is named af
     // A bad list makes no runs at all.
     const before = (await api('GET', '/api/runs')).body.length;
     assert.equal((await batch(['ITP2-1', 'ITP2-1'])).status, 400, 'twice');
-    assert.equal((await batch([' ', ''])).status, 400, 'empty');
     assert.equal((await batch(Array.from({ length: 21 }, (_, i) => `ITP2-${i}`))).status, 400, 'too many');
-    assert.equal((await batch(['ITP2-1'], { templateId: 'nope' })).status, 404);
+    assert.equal((await batch(['ITP2-1'], { templateId: 'nope' })).status, 400, 'nope is not a template: a loose word');
     assert.equal((await api('GET', '/api/runs')).body.length, before);
 
     const { status, body: runs } = await batch(['ITP2-14852', ' ITP2-14853 ', 'Fix the CbC legend']);
     assert.equal(status, 200);
     assert.deepEqual(runs.map((r) => r.input.text), ['ITP2-14852', 'ITP2-14853', 'Fix the CbC legend']);
     const first = await waitFor(async () => ((await getRun(runs[0].id)).session?.open ? getRun(runs[0].id) : null), 'the first run to open its tab');
-    assert.deepEqual([(await getRun(runs[1].id)).status, (await getRun(runs[2].id)).status], ['queued', 'queued'], 'the rest wait their turn, in order');
+    await waitFor(async () => (await Promise.all(runs.map(async (r) => (await getRun(r.id)).session?.open))).every(Boolean), 'every tab to open at once');
     const spec = (await launch(first)).body;
     assert.equal(spec.title, 'ITP2-14852', 'the tab is the Jira key');
     assert.equal(spec.args[spec.args.indexOf('--name') + 1], 'ITP2-14852');
@@ -2356,7 +2404,7 @@ test('orch: broken template files are skipped; bad input is refused', async () =
   assert.equal((await api('PUT', '/api/templates/ok-id', { name: 'x', steps: [{ id: 'a', skill: 'bad skill!' }] })).status, 400);
   assert.equal((await api('PUT', '/api/templates/..%2Fx', { name: 'x', steps: [{ id: 'a', skill: 'orchestra-hello' }] })).status, 400);
   assert.equal((await api('GET', '/api/runs/..%2Fx')).status, 404);
-  assert.equal((await api('POST', '/api/runs', { templateId: 'nope' })).status, 404);
+  assert.equal((await api('POST', '/api/runs', { templateId: 'nope' })).status, 400, 'nope is not a template: read as a loose word');
   assert.equal((await api('PUT', '/api/settings', { learn: 'maybe' })).status, 400);
   const unknown = await orchText('fly');
   assert.notEqual(unknown.code, 0);
@@ -2441,7 +2489,7 @@ test('orch: runs are found by Jira key; status, board and run read plainly', asy
   const run = await startRun(null, { input: 'https://orbitax.atlassian.net/browse/ITP2-31337' });
   await hook(run, 'Stop', say('Which repo should I use?'));
   const status = await orchText('status');
-  assert.match(status.out, /^Orchestra · \d+ running \(of 20 at once\) · \d+ need you/);
+  assert.match(status.out, /^Orchestra · \d+ working \(\d+ of 20 heavy slots\) · \d+ need you/);
   assert.match(status.out, /! ITP2-31337: needs you in its tab: Which repo should I use\?/);
   const board = await orchText('runs');
   assert.match(board.out.split('\n')[0], /^Run\s+About\s+Status\s+Step\s+Cost/);
