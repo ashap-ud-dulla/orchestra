@@ -12,8 +12,9 @@ import { parse, fail, helpText, commandNames, didYouMean } from '../lib/cli/spec
 import { watch } from '../lib/pane.mjs';
 import { commands, QUICK } from '../lib/cli/commands.mjs';
 import { pack } from '../lib/pack.mjs';
+import { gitBash, winPath } from '../lib/workspace.mjs';
 
-const NO_APP = 'this solution has no app Orchestra can start (a pack adds one; the ITP pack does).';
+const NO_APP = 'this solution has no app Orchestra can start (its pack adds one).';
 
 // The app for you, outside any run: bin/app.mjs does the work (it takes the run lock itself, so not inside one).
 // key=value words become the --key value it reads (force=yes: --force).
@@ -46,7 +47,7 @@ try {
   }
   if (name === 'setup') {
     const str = (v) => (typeof v === 'string' ? v : undefined);
-    const out = await setup({ solution: str(opt.solution) ?? str(opt.itp) ?? pos[0], email: str(opt.email), worktrees: str(opt.worktrees), uninstall: !!opt.uninstall });
+    const out = await setup({ solution: str(opt.solution) ?? pos[0], email: str(opt.email), worktrees: str(opt.worktrees), uninstall: !!opt.uninstall });
     process.stdout.write((json ? JSON.stringify(out.json, null, 1) : out.text) + '\n');
     process.exit(0);
   }
@@ -57,9 +58,11 @@ try {
     process.exit(0);
   }
   // Set up: a solution folder saved (older setups), or a pack chosen (setup always saves one).
-  if (!config.itpRoot && !config.pack) {
+  if (!config.solutionRoot && !config.pack) {
     fail(`Orchestra is not set up on this PC yet. Run: node ${path.join(config.root, 'bin', 'orch.mjs').replace(/\\/g, '/')} setup solution=<your solution folder> (or setup alone, for no folder)`);
   }
+  // mine reads the pack's tracker (network, read only) before taking the lock, so no other command waits on it.
+  if (name === 'mine') opt.held = pack.mine ? await pack.mine(config.solutionRoot, { gitBash, winPath }) : null;
   if (name === 'tick') fs.rmSync(path.join(config.runsDir, TICK_MARK), { force: true }); // see spawnTick
   // Commands that only show things never do slow work themselves (start runs, clean up): other processes do.
   const out = await withRunner((r) => cmd(r, { pos, opt }), { archived: true, detach: QUICK.has(name) });

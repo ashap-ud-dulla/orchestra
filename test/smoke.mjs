@@ -10,8 +10,12 @@ import assert from 'node:assert/strict';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseFrontmatter } from '../lib/skills-scan.mjs';
 import { childEnv, guardEnv, lastReply } from '../lib/runner.mjs';
-import { check, readMark, readWhy } from '../lib/guard.mjs';
-import { detect } from '../lib/tracking.mjs';
+import { check as checkWith, readMark, readWhy } from '../lib/guard.mjs';
+import { detect as detectWith } from '../lib/tracking.mjs';
+import itpTracking from '../packs/itp/tracking.mjs';
+// In this process the pack is not set up: the guard and the skill scan get the ITP pack's tracking by hand.
+const detect = (text) => detectWith(text, itpTracking.signs);
+const check = (tool, input, env) => checkWith(tool, input, env, itpTracking);
 import { computeStats } from '../lib/stats.mjs';
 import { material, parseSuggestions } from '../lib/learn.mjs';
 
@@ -45,7 +49,7 @@ const testItp = path.join(tmp, 'itp-base').replace(/\\/g, '/');
 fs.mkdirSync(path.join(testItp, '.claude', 'skills', 'review-changes'), { recursive: true });
 fs.writeFileSync(path.join(testItp, '.claude', 'skills', 'review-changes', 'SKILL.md'), '---\nname: review-changes\ndescription: a team skill\n---\nReview.\n');
 function useEnv(extra = {}) {
-  env = { ...baseEnv, ORCHESTRA_ITP_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_PACK: 'itp', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
+  env = { ...baseEnv, ORCHESTRA_SOLUTION_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_PACK: 'itp', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
 }
 useEnv();
 
@@ -317,13 +321,13 @@ test('git hooks: push waits for Approve, main is refused, the repo hook still ru
   }
 });
 
-test('wrap up: only while its step works may the ITP folder commit Execution/ files on main and push them', () => {
+test('wrap up: only while its step works may the pack\'s wrap-up folder commit its files on main and push them', () => {
   const t = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-itp-'));
   const itp = path.join(t, 'itp');
   const run = path.join(t, 'run');
   fs.mkdirSync(run);
   const git = (args, extra = {}) => spawnSync('git', args, { cwd: itp, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...extra } });
-  const env = (more = {}) => ({ ...guardEnv(run, true), ORCHESTRA_ITP_ROOT: itp.replace(/\\/g, '/'), ...more });
+  const env = (more = {}) => ({ ...guardEnv(run, true), ORCHESTRA_WRAPUP_DIRS: itp.replace(/\\/g, '/'), ORCHESTRA_WRAPUP_ONLY: '^Execution/', ...more });
   const flag = (on) => (on ? fs.writeFileSync(path.join(run, 'wrap-up.ok'), 'x') : fs.rmSync(path.join(run, 'wrap-up.ok'), { force: true }));
   try {
     spawnSync('git', ['init', '-q', '--bare', 'remote.git'], { cwd: t });
@@ -337,7 +341,7 @@ test('wrap up: only while its step works may the ITP folder commit Execution/ fi
     assert.equal(git(['commit', '-qm', 'e'], env()).status, 0, 'an Execution file on main, in Wrap up');
     fs.writeFileSync(path.join(itp, 'other.txt'), 'x');
     git(['add', 'other.txt']);
-    assert.match(git(['commit', '-qm', 'o'], env()).stderr, /only Execution\/ files may be committed/);
+    assert.match(git(['commit', '-qm', 'o'], env()).stderr, /only files matching \^Execution\/ may be committed/);
     git(['reset', '-q', 'other.txt']);
     assert.equal(git(['push', '-q', 'origin', 'main'], env()).status, 0, 'pushed to main in Wrap up');
     flag(false);
@@ -345,26 +349,22 @@ test('wrap up: only while its step works may the ITP folder commit Execution/ fi
     git(['add', 'Execution/f.json']);
     assert.match(git(['commit', '-qm', 'f'], env()).stderr, /main branch is refused/, 'refused again after it');
     // The vault pushes to main only in Wrap up too.
-    const vault = env({ ORCHESTRA_ITP_ROOT: 'C:/elsewhere', ORCHESTRA_MAIN_OK: itp });
+    const vault = env({ ORCHESTRA_WRAPUP_DIRS: 'C:/elsewhere', ORCHESTRA_MAIN_OK: itp });
     assert.equal(git(['commit', '-qm', 'f'], vault).status, 0, 'a vault commit on main');
     assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /main branch is refused/);
     flag(true);
     assert.equal(git(['push', '-q', 'origin', 'main'], vault).status, 0, 'the vault push in Wrap up');
     // The Claude guard: the same, and the run's own folder is out of reach.
-    const g = { ORCHESTRA_RUN_DIR: run, ORCHESTRA_ITP_ROOT: 'C:/Work/ITP' };
+    const g = { ORCHESTRA_RUN_DIR: run, ORCHESTRA_WRAPUP_DIRS: 'C:/Work/ITP' };
     assert.equal(check('Bash', { command: 'git -C C:/Work/ITP push origin main' }, g)?.needsApproval, true);
     assert.equal(check('Bash', { command: 'git -C "C:\\Work\\ITP" push origin main' }, g)?.needsApproval, true);
     assert.equal(check('Bash', { command: 'git -C C:/Work/ITP/ITP-API push origin main' }, g)?.needsApproval, false, 'a repo inside ITP is not ITP');
     assert.equal(check('Write', { file_path: path.join(run, 'state.json') }, g)?.needsApproval, false);
     assert.equal(check('Bash', { command: 'touch "$ORCHESTRA_RUN_DIR/wrap-up.ok"' }, g)?.needsApproval, false);
-    // A tab opened before ORCHESTRA_ITP_ROOT existed: the flag tells where the ITP folder is.
-    fs.writeFileSync(path.join(run, 'wrap-up.ok'), itp.replace(/\\/g, '/'));
-    const old = { ...guardEnv(run, true), ORCHESTRA_ITP_ROOT: '' };
-    fs.writeFileSync(path.join(itp, 'Execution', 'g.json'), '{}');
-    git(['add', 'Execution/g.json']);
-    assert.equal(git(['commit', '-qm', 'g'], old).status, 0, 'an old tab commits Execution files in Wrap up');
-    assert.equal(git(['push', '-q', 'origin', 'main'], old).status, 0, 'and pushes them');
-    assert.equal(check('Bash', { command: `git -C ${itp.replace(/\\/g, '/')} push origin main` }, { ORCHESTRA_RUN_DIR: run })?.needsApproval, true);
+    // The vault, named as the pack names it, may push in Wrap up too.
+    assert.equal(check('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run })?.needsApproval, true);
+    // No pack: no place on main.
+    assert.equal(checkWith('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run }, false)?.needsApproval, false);
     flag(false);
     assert.equal(check('Bash', { command: 'git -C C:/Work/ITP push origin main' }, g)?.needsApproval, false, 'refused outside Wrap up');
   } finally {
@@ -678,6 +678,59 @@ test('intake: a run started with nothing takes the key its first step picks (a w
   await hook(run, 'Stop', done('built\nORCHESTRA:DO go 1'));
   assert.deepEqual((await getRun(run.id)).steps.map((s) => s.status), ['done', 'skipped', 'done'], 'a DO that came with DONE is ignored');
   await close(run);
+});
+
+test('core: no ITP word in the core (lib, bin, skills, defaults); ITP lives only in packs/itp', () => {
+  const ITP = /\bitp\w*|itpkv|teamspace|work.?orders?\b|apphost|aspire|debug\.json|orbitax|close-epic|registry_call|\bmission\b|\bvault\b|\bTSP-|run-stack|webclient|\bdotnet\b/i;
+  const hits = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else String(fs.readFileSync(p, 'utf8')).split('\n').forEach((line, i) => ITP.test(line) && hits.push(`${path.relative(ROOT, p)}:${i + 1}: ${line.trim().slice(0, 100)}`));
+    }
+  };
+  for (const d of ['lib', 'bin', 'skills', 'defaults']) walk(path.join(ROOT, d));
+  assert.deepEqual(hits, [], 'move these into packs/itp (a pack field, or the pack\'s own files)');
+});
+
+test('mine: the pack lists the work you hold, read only, numbered, with the run each has', async () => {
+  // A fake ITP helper: registry_call answers from files and logs every method it is asked for.
+  const root = path.join(tmp, 'mine-itp');
+  fs.mkdirSync(path.join(root, 'scripts', 'lib'), { recursive: true });
+  const log = path.join(root, 'calls.log').replace(/\\/g, '/');
+  fs.writeFileSync(path.join(root, 'scripts', 'lib', 'common.sh'), [
+    `REGISTRY_BODY="${root.replace(/\\/g, '/')}/body.json"`,
+    'registry_configured() { [[ -z "${NO_REG:-}" ]]; }',
+    `registry_call() { echo "$1 $2" >> "${log}"; case "$2" in`,
+    `  /api/me) printf '%s' '{"id":"m-7","name":"Dev"}' > "$REGISTRY_BODY" ;;`,
+    `  /api/members/m-7/working-on) printf '%s' '{"items":[{"woKey":"TSP-W-7","title":"Export dashboards","state":"In Progress"},{"woKey":"TSP-W-8","title":"Fix the legend","state":"Picked"}]}' > "$REGISTRY_BODY" ;;`,
+    '  *) printf 404; return 0 ;; esac; printf 200; }',
+    '',
+  ].join('\n'));
+  useEnv({ ORCHESTRA_SOLUTION_ROOT: root.replace(/\\/g, '/') });
+  try {
+    const draft = await orch('start', 'demo-hello-recap', 'TSP-W-8', 'draft=yes');
+    assert.equal(draft.status, 200, JSON.stringify(draft.body));
+    const out = await orch('mine');
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.deepEqual(out.body.items.map((x) => [x.n, x.key, x.title, x.state, !!x.run]), [[1, 'TSP-W-7', 'Export dashboards', 'In Progress', false], [2, 'TSP-W-8', 'Fix the legend', 'Picked', true]]);
+    assert.match((await orchText('mine')).out, /1\s+TSP-W-7\s+Export dashboards/);
+    assert.deepEqual([...new Set(fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' ')[0]))], ['GET'], 'read only');
+    await orch('delete', draft.body.id);
+    // Not configured: it says so, and lists nothing.
+    const off = await proc([path.join(ROOT, 'bin/orch.mjs'), 'mine', '--json'], { extraEnv: { NO_REG: '1' } });
+    assert.match(JSON.parse(off.out).problem, /not configured/);
+  } finally {
+    useEnv();
+  }
+  // No pack: nothing to list, said plainly.
+  useEnv({ ORCHESTRA_PACK: 'none' });
+  try {
+    assert.match((await orch('mine')).body.problem, /no tracker list/);
+  } finally {
+    useEnv();
+  }
 });
 
 test('no template: pasted keys each open a run whose first step picks the task and the steps, and puts them in with "this"', async () => {
@@ -1127,7 +1180,7 @@ test('app: start stops the app of the run before, starts this run\'s, and leaves
 });
 
 test('launcher: the AppHost gets the run\'s resource list, keeps your own settings, and leaves the brokers off when they run', async () => {
-  const L = await import('../lib/launcher.mjs');
+  const L = await import('../packs/itp/app/launcher.mjs');
   const saved = { start: process.env.ORCHESTRA_APP_START, mission: process.env.ITP_MissionApis };
   delete process.env.ORCHESTRA_APP_START;
   const ws = path.join(tmp, 'ws-apphost');
@@ -1182,7 +1235,7 @@ test('launcher: the AppHost gets the run\'s resource list, keeps your own settin
     const inRepo = path.join(host, 'appsettings.local.json.bak-orchestra');
     fs.writeFileSync(inRepo, '{"old":1}');
     // In a child with the tests' data folder (an import here would see this PC's data folder).
-    const keep = `import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'lib/launcher.mjs')).href)}).then((L) => console.log(L.keepSettingsBackup(${JSON.stringify(ws)})))`;
+    const keep = `import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'packs/itp/app/launcher.mjs')).href)}).then((L) => console.log(L.keepSettingsBackup(${JSON.stringify(ws)})))`;
     const kept = await proc(['--input-type=module', '-e', keep]);
     const backup = kept.out.trim();
     assert.ok(!fs.existsSync(inRepo), 'nothing left in the repo');
@@ -1246,7 +1299,7 @@ test('launcher: orch settings picks it; app start, restart and logs use it; stop
 });
 
 test('log copier: Aspire\'s per-service consoles become plain .run-logs/<service>.log files; stop ends the copier', async () => {
-  const L = await import('../lib/launcher.mjs');
+  const L = await import('../packs/itp/app/launcher.mjs');
   assert.equal(L.dcpLine('12 2026-11-03T11:25:24.801Z \x1b[40m\x1b[31mfail\x1b[39m\x1b[22m\x1b[49m: Boom[0]'), 'fail: Boom[0]');
   assert.deepEqual([L.logNameOf('platform'), L.logNameOf('spreadsheetjob'), L.logNameOf('mission'), L.logNameOf('website-api')], ['api', 'spreadsheet', 'mission', 'website-api']);
 
@@ -1360,7 +1413,7 @@ test('app: your hold ends by itself once your app is gone', async () => {
 });
 
 test('app: stop leaves an editor that has the folder open alone (only the app\'s own processes)', async () => {
-  const { hostsIn } = await import('../lib/app.mjs');
+  const { hostsIn } = await import('../packs/itp/app/procs.mjs');
   const ws = path.join(tmp, 'ws-editor');
   fs.mkdirSync(ws, { recursive: true });
   // An "editor" that names the folder and an Orbitax solution, and a host started with dotnet run from it.
@@ -1391,8 +1444,8 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   const home = path.join(tmp, 'fresh-home');
   const data = path.join(tmp, 'fresh-data');
   const runsAt = path.join(tmp, 'fresh-runs');
-  const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: 'itp' } });
-  const plain = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: path.join(tmp, 'plain-data'), ORCHESTRA_HOME_SKILLS: path.join(tmp, 'plain-home'), ORCHESTRA_ITP_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: '' } });
+  const fresh = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_SOLUTION_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: 'itp' } });
+  const plain = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: { ORCHESTRA_DATA_DIR: path.join(tmp, 'plain-data'), ORCHESTRA_HOME_SKILLS: path.join(tmp, 'plain-home'), ORCHESTRA_SOLUTION_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: '' } });
   const none = await plain('status');
   assert.notEqual(none.code, 0);
   assert.match(none.err, /Orchestra is not set up on this PC yet\. Run: node .*bin\/orch\.mjs setup solution=/);
@@ -1407,7 +1460,7 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   // The menu skill before it was /orch, installed by an older setup: removed (no run tab is open).
   fs.mkdirSync(path.join(home, 'orchestra'), { recursive: true });
   fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), '{}');
-  const s = await fresh('setup', 'itp=' + testItp, 'email=dev@example.com', 'worktrees=' + runsAt);
+  const s = await fresh('setup', 'solution=' + testItp, 'email=dev@example.com', 'worktrees=' + runsAt);
   assert.equal(s.code, 0, s.err + s.out);
   assert.match(s.out, /orchestra: old name, removed/);
   assert.ok(!fs.existsSync(path.join(home, 'orchestra')));
@@ -1803,7 +1856,7 @@ function makeFakeItp() {
 let fakeItp = null;
 function useFakeItp() {
   fakeItp ||= makeFakeItp();
-  useEnv({ ORCHESTRA_ITP_ROOT: fakeItp.root, ORCHESTRA_WORKTREES_DIR: fakeItp.worktrees });
+  useEnv({ ORCHESTRA_SOLUTION_ROOT: fakeItp.root, ORCHESTRA_WORKTREES_DIR: fakeItp.worktrees });
   return fakeItp;
 }
 const gitIn = (dir, args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'f', GIT_AUTHOR_EMAIL: 'f@f', GIT_COMMITTER_NAME: 'f', GIT_COMMITTER_EMAIL: 'f@f' } });
@@ -1947,14 +2000,14 @@ test('no pack: a one-repo project on master, a path with a space, a GitHub PR li
   g(['remote', 'set-head', 'origin', 'master'], solo);
   const home = path.join(tmp, 'solo-home');
   fs.cpSync(path.join(ROOT, 'test/skills'), home, { recursive: true });
-  useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_ITP_ROOT: '', ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
+  useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_SOLUTION_ROOT: '', ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
   try {
     // Setup: the folder, no pack, the core starter.
     const s = await orchText('setup', `solution=${solo}`, `worktrees=${path.join(tmp, 'solo-wt')}`);
     assert.equal(s.code, 0, s.err + s.out);
     assert.match(s.out, /Pack: none[^]*orch-plan: installed[^]*wrap-up: installed/);
     assert.ok(fs.existsSync(path.join(tmp, 'solo-data', 'templates', 'plan-build-review.json')), 'the starter template');
-    useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_ITP_ROOT: solo, ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
+    useEnv({ ORCHESTRA_PACK: 'none', ORCHESTRA_SOLUTION_ROOT: solo, ORCHESTRA_DATA_DIR: path.join(tmp, 'solo-data'), ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_WORKTREES_DIR: path.join(tmp, 'solo-wt') });
     // The folder is the repo: one repo, from origin/master.
     const { body: repos } = await orch('repos');
     assert.deepEqual(repos.map((r) => [r.token, r.defaultBase]), [['solo-app', 'origin/master']]);
@@ -2019,7 +2072,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
       + 'After the merge: `bash scripts/close-epic.sh 2026-10-27-ITP-E-08-ship`, or `bash scripts/close-epic.sh <epic-folder> --target x`.';
     await hook(run, 'Stop', done(report));
     const fin = await getRun(run.id);
-    assert.deepEqual(fin.ship, { prUrls: ['https://bitbucket.org/orbitax/itp-api/pull-requests/new?source=epics/lyra-ITP-E-08-ship'], epicFolder: '2026-10-27-ITP-E-08-ship' }, 'the PR link and the epic folder for the Wrap up step');
+    assert.deepEqual(fin.ship, { prUrls: ['https://bitbucket.org/orbitax/itp-api/pull-requests/new?source=epics/lyra-ITP-E-08-ship'], notes: { 'Epic folder': '2026-10-27-ITP-E-08-ship' } }, 'the PR link and the epic folder for the Wrap up step');
     assert.equal((await api('POST', `/api/runs/${run.id}/clean-up`)).status, 409, 'its tab is open');
 
     // Closing the tab cleans nothing: clean-up happens when you say so.
@@ -2058,7 +2111,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     // "not yet" waits for next; done means "clean when the tab closes", and closing it cleans up.
     const run2 = await startRun(null, { templateId: 'ws-wrap', input: 'merged one' });
     const flag = path.join(runsDir, run2.id, 'wrap-up.ok');
-    const genv = { ORCHESTRA_RUN_DIR: path.join(runsDir, run2.id), ORCHESTRA_ITP_ROOT: 'C:/Work/ITP' };
+    const genv = { ORCHESTRA_RUN_DIR: path.join(runsDir, run2.id), ORCHESTRA_WRAPUP_DIRS: 'C:/Work/ITP' };
     gitIn(path.join(run2.workspace.dir, 'ITP-API'), ['switch', '-q', '-c', 'epics/lyra-ITP-E-09-merged']); // no new commit: merged already
     await hook(run2, 'Stop', done('Create PR: https://bitbucket.org/orbitax/itp-api/pull-requests/new?source=epics/lyra-ITP-E-09-merged\n`bash scripts/close-epic.sh 2026-10-28-ITP-E-09-merged`'));
     assert.equal((await getRun(run2.id)).status, 'waiting', 'it waits for you before Wrap up');
@@ -2072,7 +2125,8 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     assert.equal(check('Bash', { command: 'cd ITPKV && git push origin main' }, genv)?.needsApproval, true, 'the vault push asks you');
     assert.equal(check('Bash', { command: 'git -C ITP-API push origin main' }, genv)?.needsApproval, false, 'a code repo never pushes main');
     const spec = (await launch(await getRun(run2.id), fakeLauncher())).body;
-    assert.equal(spec.env.ORCHESTRA_ITP_ROOT, path.join(tmp, 'itp').replace(/\\/g, '/'));
+    assert.equal(spec.env.ORCHESTRA_WRAPUP_DIRS, path.join(tmp, 'itp').replace(/\\/g, '/'));
+    assert.equal(spec.env.ORCHESTRA_WRAPUP_ONLY, '^Execution/');
     await hook(run2, 'Stop', { last_assistant_message: 'Type next when you are ready, and I run the wrap-up again.' });
     assert.equal((await getRun(run2.id)).status, 'needs-you', 'not yet');
     assert.match(context(await hook(run2, 'UserPromptSubmit', { prompt: 'next' })), /ready to wrap up now[\s\S]*\/wrap-up/, 'next runs Wrap up again');

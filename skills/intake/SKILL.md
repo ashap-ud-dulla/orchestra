@@ -21,7 +21,7 @@ Read only: never change a ticket. Write `.orchestra/task.md` (make the folder): 
 `## The task` (in full), `## Comments`, `## Attachments`.
 
 **Overlap**: run `orch runs all --json`. If another open run (not cleaned) works on the same feature or the same code,
-say so in one line and suggest an order ("do this after ITP2-15005's build") or doing them as one. The user decides;
+say so in one line and suggest an order ("do this after ABC-12's build") or doing them as one. The user decides;
 never change another run.
 
 ## 2. The steps

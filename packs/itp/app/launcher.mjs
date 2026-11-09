@@ -8,7 +8,7 @@
 // ORCHESTRA_APP_START (a JSON command line with {ws}) overrides both; the tests use it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { config } from './config.mjs';
+import { config } from '../../../lib/config.mjs';
 
 export const LAUNCHERS = ['apphost', 'runstack'];
 export const DEFAULT_LAUNCHER = 'apphost';

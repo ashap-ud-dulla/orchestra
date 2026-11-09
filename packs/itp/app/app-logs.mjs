@@ -1,13 +1,13 @@
-// The log copier for an app started with the Aspire AppHost: node bin/app-logs.mjs <ws> [<pid>]
+// The log copier for an app started with the Aspire AppHost: node packs/itp/app/app-logs.mjs <ws> [<pid>]
 // Aspire writes no per-service log files, but its DCP keeps each service's console in a session folder (deleted when
 // the app stops). This copies that, line by line, into <ws>/.run-logs/<service>.log (api.log, primary.log, …), the
-// files the "Test in the app" step watches, as run-stack.ps1 wrote them. bin/app.mjs starts it with the AppHost and
+// files the "Test in the app" step watches, as run-stack.ps1 wrote them. app.mjs starts it with the AppHost and
 // app stop ends it; it also ends by itself when <pid> (the AppHost start) is gone.
 import fs from 'node:fs';
 import path from 'node:path';
-import { dcpSessionFor } from '../lib/app.mjs';
-import { dcpResources, dcpLine, logNameOf, logsDir } from '../lib/launcher.mjs';
-import { sleep, alive } from '../lib/util.mjs';
+import { dcpSessionFor } from './procs.mjs';
+import { dcpResources, dcpLine, logNameOf, logsDir } from './launcher.mjs';
+import { sleep, alive } from '../../../lib/util.mjs';
 
 const ws = process.argv[2];
 const owner = Number(process.argv[3]) || 0;

@@ -1,17 +1,24 @@
 # Orchestra — personal tool
 
-Personal tool. Never call Teamspace. Never touch ITPKV.
+Personal tool. Never write to Teamspace: Orchestra only reads it, only through the ITP pack (`orch mine`, the
+`intake` step), with ITP's own `registry_call GET`. Never touch ITPKV. In this repo's own sessions, never call
+Teamspace yourself (tests fake it).
+**The core knows nothing of ITP**: `lib/`, `bin/`, `skills/`, `defaults/` hold mechanisms only; everything ITP
+(Teamspace, work orders, the vault, the ITP app, epics, ITP keys) lives in `packs/itp`. Nothing is ever pushed to
+the ITP repo for Orchestra.
 Never edit the itp-workspace repo or anything under `.claude/users/`.
 
-Orchestra only touches ITP in three ways:
+Orchestra only touches ITP in four ways (all through `packs/itp`):
 1. Reads the skill list from `<ITP>/.claude/skills` (and your user skills folder).
 2. Creates git worktrees of ITP repos for runs (build step 4).
 3. Runs do their own work inside those worktrees. This includes starting the app from their workspace
-   (`bin/app.mjs`, called by the `app-test` step): one run at a time, in line. It stops only an app
-   Orchestra started; the user's own app is stopped only after they say ok (`--force`).
+   (`bin/app.mjs` passes it to `packs/itp/app/app.mjs`; called by the `app-test` step): one run at a time, in line.
+   It stops only an app Orchestra started; the user's own app is stopped only after they say ok (`--force`).
+4. Reads the Work Orders you hold (`orch mine`: `GET /api/me`, `GET /api/members/<id>/working-on` through ITP's
+   own `registry_call`).
 
 - Node 22, no npm packages. Terminal only: no server, no web page. Windows only (Windows Terminal, PowerShell).
-- **Any Windows PC**: no path, email or data of one PC in the code. `orch setup itp=<folder>` saves this PC's ITP
+- **Any Windows PC**: no path, email or data of one PC in the code. `orch setup solution=<folder>` saves this PC's solution
   folder and email (from git) in `data/settings.json`; `data/` is not in git (`defaults/` holds the starter templates).
   Tests make their own ITP folder and never read this PC's.
 - **Core + packs**: the core knows no solution. `packs/<name>/pack.mjs` adds one (repos, run rules, MCP lists,
@@ -19,9 +26,10 @@ Orchestra only touches ITP in three ways:
   `packs/itp`. The active pack: `ORCHESTRA_PACK`, else settings `pack` (setup saves it), else detected from the
   solution folder. No pack: repos are found in the folder (the folder itself or its child repos), no app, no
   tracking; the core starter skills (`orch-plan`, `orch-build`, `orch-review`, `wrap-up`, `orch-hello`) and
-  templates (`defaults/templates`). The guard still holds ITP's vault/Teamspace patterns: they only match ITP words.
+  templates (`defaults/templates`). A test (`core: no ITP word…`) fails when an ITP word shows up in lib/, bin/,
+  skills/ or defaults/. Pack fields: `lib/pack.mjs` (NONE lists each with its default).
   `orch setup [solution=<folder>|none]`: the folder is optional. Tests run with `ORCHESTRA_PACK=itp`.
-- **Skills live in the repo** (`skills/`, with `{{ORCHESTRA}}` / `{{ITP}}` placeholders). `orch setup` installs them
+- **Skills live in the repo** (`skills/`, with `{{ORCHESTRA}}` / `{{SOLUTION}}` placeholders). `orch setup` installs them
   into `~/.claude/skills` with the paths filled in: edit `skills/`, then run `orch setup`, never the installed copies.
 - `/orch` (installed from `skills/orch`) is the front door: a menu plus shortcuts. It only calls
   `node bin/orch.mjs <command>` (`orch help` lists them; every command, its options and its help line live in one list, `lib/cli/spec.mjs`;
@@ -62,9 +70,10 @@ Orchestra only touches ITP in three ways:
 - Clean-up happens only when the user says so: it stops what runs from the run folder, removes the folder, prunes
   git's worktree records and removes the run's Claude conversation files. Branches, notes and stats stay.
   The usual way is the last template step `wrap-up` (personal skill), in the run's own tab: the user picks
-  the jobs (push the vault, close the epic, commit + push the run's own `ITP/Execution/` files) and clean or keep; with
-  clean, closing the tab cleans up. Only while that step works (flag `runs/<id>/wrap-up.ok`) may the vault and the ITP
-  folder push to `main`, after the user's Allow; in the ITP folder only `Execution/` files may be committed. This is
+  the jobs (ITP: push the vault, close the epic, commit + push the run's own `Execution/` files) and clean or keep;
+  with clean, closing the tab cleans up. Only while that step works (flag `runs/<id>/wrap-up.ok`) may the folders
+  the pack names (`mainOkDirs`, `wrapUpPushDirs` → env `ORCHESTRA_MAIN_OK`, `ORCHESTRA_WRAPUP_DIRS`) push to `main`,
+  after the user's Allow; there only the files `wrapUpCommitOnly` names may be committed (ITP: `Execution/`). This is
   the one exception to "never edit the itp-workspace repo". `orch clean` cleans runs without the step.
 - Code layout: `lib/runner.mjs` is the run state machine (hooks, steps moving on); its other jobs are part classes in
   `lib/run/` (session, tab-commands, app-queue, cleanup, lessons) whose methods become Runner's own, plus helpers

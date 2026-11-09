@@ -145,7 +145,7 @@ The app is at http://localhost:9000 (api http://localhost:50544).
 
 ## 6. Optional: AI-driven browser tests
 
-Only when the user asks for it. Then follow `{{ITP}}/.claude/skills/run-playwright-automation/SKILL.md`
+Only when the user asks for it. Then follow `{{SOLUTION}}/.claude/skills/run-playwright-automation/SKILL.md`
 for this run's epic, with `--no-start`. Use **one** browser window for the whole test: start Chrome once (headed,
 `--remote-debugging-port=9222`, its own `--user-data-dir` under `.orchestra-test/`), attach each script with Playwright
 `connectOverCDP`, never close the browser from a script, never launch one browser per script. Screenshots go in

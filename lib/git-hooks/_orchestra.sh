@@ -31,8 +31,8 @@ orchestra_chain() {
   "$hook" "$@"
 }
 
-# The current repo is one where local work on main is allowed: the vault (ITPKV), which the
-# team commits to on main by design. ORCHESTRA_MAIN_OK lists those folders, one per line.
+# The current repo is one where local work on main is allowed (a notes repo the team commits to on main by design,
+# the pack's). ORCHESTRA_MAIN_OK lists those folders, one per line.
 orchestra_main_ok() {
   orchestra_repo_in "$ORCHESTRA_MAIN_OK"
 }
@@ -42,12 +42,9 @@ orchestra_wrap_up() {
   [ -n "$ORCHESTRA_RUN_DIR" ] && [ -f "$ORCHESTRA_RUN_DIR/wrap-up.ok" ]
 }
 
-# The current repo is the ITP folder itself (the itp-workspace repo, on main).
-# Tabs opened before ORCHESTRA_ITP_ROOT existed read it from the Wrap up flag.
-orchestra_is_itp() {
-  root=$ORCHESTRA_ITP_ROOT
-  [ -n "$root" ] || root=$(cat "$ORCHESTRA_RUN_DIR/wrap-up.ok" 2>/dev/null)
-  orchestra_repo_in "$root"
+# The current repo is one the Wrap up step may commit and push on main (the pack's, ORCHESTRA_WRAPUP_DIRS).
+orchestra_is_wrapup_dir() {
+  orchestra_repo_in "$ORCHESTRA_WRAPUP_DIRS"
 }
 
 # The current repo's top folder is one of $1 (folders, one per line).
@@ -85,10 +82,10 @@ orchestra_is_main() {
   [ -n "$def" ] && [ "$1" = "${def#origin/}" ]
 }
 
-# Refuses work on main, except in the vault, and in the ITP folder while the Wrap up step works.
+# Refuses work on main, except in the folders allowed on main, and in the Wrap up folders while that step works.
 orchestra_no_main() {
   orchestra_is_main "$(orchestra_branch)" || return 0
   orchestra_main_ok && return 0
-  orchestra_wrap_up && orchestra_is_itp && return 0
+  orchestra_wrap_up && orchestra_is_wrapup_dir && return 0
   orchestra_refuse "work on the main branch is refused. Use the run's work branch."
 }

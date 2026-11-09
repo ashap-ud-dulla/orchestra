@@ -3,6 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import tracking from './tracking.mjs';
+import { stopFor } from './app/procs.mjs';
 
 // Tokens in repo_dir_for that are not code repos a run works in.
 const NOT_A_RUN_REPO = new Set(['itp-workspace', 'progress']);
@@ -37,6 +39,12 @@ export default {
     return out;
   },
 
+  // ITP's scripts see the run folder as the ITP root, and the run's repos as theirs. No ITP_BRANCH_OVERRIDE: ITP's
+  // scripts must use the epic's own branch.
+  workspaceEnv: (ws) => ({ ITP_ROOT: ws.dir, ITP_REPO_DIRS: ws.repos.map((r) => `${r.token}=${r.dir}`).join('\n') }),
+  // ITP's own dev-parallel folder is not linked into run folders.
+  skipLinks: ['.parallel'],
+
   // ITP's integration branch, when the checkout is not on a development branch.
   defaultBases: ['origin/development/mission'],
 
@@ -56,8 +64,20 @@ export default {
 
   // Tracking OFF: ITP's own scripts skip Teamspace (ITP_REGISTRY_OFF=1 is their built-in "no server read or write").
   offEnv: { ITP_REGISTRY_OFF: '1' },
-  tracking: true,
+  tracking,
   trackingOffText: 'Tracking is OFF: no Teamspace calls, no vault (ITPKV) writes.',
+
+  rules: ['When the task in .orchestra/task.md is a Work Order and you run /plan-itp, add --wo with its key.'],
+
+  // The Wrap up step may commit and push the ITP folder itself (on main), its Execution/ files only.
+  wrapUpPushDirs: (root) => (root ? [String(root).replace(/\\/g, '/')] : []),
+  wrapUpCommitOnly: '^Execution/',
+
+  // What a run shipped, read from its replies: the epic folder close-epic.sh names.
+  shipFrom(text) {
+    const folder = String(text).match(/close-epic\.sh\s+([A-Za-z0-9][\w.-]*)/);
+    return folder ? { 'Epic folder': folder[1] } : {};
+  },
 
   // Team skills, and your own (.claude/users/<email>/skills).
   skillsDirs: (root, email) => [
@@ -68,6 +88,7 @@ export default {
   wrapUpLines(run, root) {
     const itp = String(root || '').replace(/\\/g, '/');
     return [
+      ...(run.ship?.notes?.['Epic folder'] ? [] : ['- Epic folder: not known (look in this conversation; there may be none)']),
       `- The vault: ${itp}/ITPKV. The ITP folder (the itp-workspace repo, on main): ${itp}`,
       `- Tracking: ${run.tracking === false ? 'OFF (do not offer to close the epic or to change the vault)' : 'on'}`,
       'While this step works, the vault and the ITP folder (its Execution/ files only) may be pushed to main; the user still clicks Allow for each push. End the way the skill says.',
@@ -81,6 +102,45 @@ export default {
   // The core's starter skills (orch-plan, orch-build, orch-review, orch-hello) are not installed: ITP has its own.
   starterSkills: false,
 
-  // bin/app.mjs: the AppHost or run-stack launcher (lib/launcher.mjs), Debug.json, Mission, Outsider.
-  app: true,
+  // The ITP app (app/app.mjs, run through bin/app.mjs): the AppHost or run-stack launcher, Debug.json, Mission,
+  // Outsider. stopFor: clean-up stops it when it serves the run's folder.
+  app: { script: 'app/app.mjs', stopFor },
+  // orch settings launcher=apphost|runstack: how the app starts.
+  settings: {
+    launcher: { values: ['apphost', 'runstack'], default: 'apphost', about: 'the app starts with', words: { apphost: 'the Aspire AppHost (apphost)', runstack: 'run-stack.ps1 (runstack)' } },
+  },
+  // Clean-up: shared .NET build servers keep DLLs open in a run folder.
+  freeFiles() {
+    spawnSync('dotnet', ['build-server', 'shutdown'], { stdio: 'ignore', windowsHide: true, timeout: 120000 });
+    return 'stopped the .NET build servers that held its files';
+  },
+
+  // orch mine: the Work Orders you hold or pair on, read only, through ITP's own helper (scripts/lib/common.sh
+  // registry_call GET, the way the team skills read Teamspace). Never another method.
+  mine(root, { gitBash }) {
+    if (!root) return { items: [], problem: 'no ITP folder set up (orch setup solution=<folder>)' };
+    const get = (apiPath) => {
+      const script = `source scripts/lib/common.sh >/dev/null 2>&1 || { echo NOHELPER; exit 0; }
+registry_configured || { echo NOCONF; exit 0; }
+s="$(registry_call GET '${apiPath}')"; echo "STATUS $s"; cat "$REGISTRY_BODY" 2>/dev/null; rm -f "$REGISTRY_BODY"`;
+      const r = spawnSync(gitBash(), ['-c', script], { cwd: root, encoding: 'utf8', timeout: 60000, windowsHide: true, env: { ...process.env, ITP_ROOT: root } });
+      const out = r.stdout || '';
+      if (/^NOHELPER/.test(out)) throw new Error(`no scripts/lib/common.sh in ${root}`);
+      if (/^NOCONF/.test(out)) throw new Error('Teamspace is not configured on this PC (no .itp/registry-url)');
+      const m = /^STATUS (\d+)\r?\n?([\s\S]*)$/.exec(out);
+      if (!m) throw new Error(`could not read Teamspace${r.error ? ` (${r.error.message})` : ''}`);
+      if (m[1] === '000') throw new Error('Teamspace is not reachable from this PC now');
+      if (m[1] !== '200') throw new Error(`Teamspace answered ${m[1]} for ${apiPath}`);
+      return JSON.parse(m[2]);
+    };
+    try {
+      const me = get('/api/me');
+      if (!me?.id) return { items: [], problem: 'Teamspace did not say who you are (/api/me)' };
+      const on = get(`/api/members/${encodeURIComponent(me.id)}/working-on`);
+      const items = (on?.items || []).map((x) => ({ key: x.woKey, title: x.title, state: x.state, kind: 'Work order' }));
+      return { items, who: me.name || me.email || null };
+    } catch (err) {
+      return { items: [], problem: err.message };
+    }
+  },
 };

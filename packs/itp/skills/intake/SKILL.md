@@ -13,14 +13,23 @@ run with no Allow prompt.
 Read only, everywhere: never change a Work Order (no state move, no pick, no comment) and never write to Jira. If
 tracking is OFF for this run, Teamspace calls are refused: then skip Teamspace and ask for the key or the job.
 
+**Reading Teamspace** (the way the team skills do; there is no `teamspace` command on the PATH): in Bash, from the run
+folder, `source scripts/lib/common.sh`, then `registry_call GET <path>`. It prints the HTTP status; the answer is in
+the file `$REGISTRY_BODY` (`cat "$REGISTRY_BODY"`). Only `GET`, never another method. Status `000` or no registry
+configured: the server is not reachable from here; say so in one line.
+- Who you are: `GET /api/me` → your member `id`.
+- What you hold: `GET /api/members/<id>/working-on` → `items`: the Work Orders you hold or pair on, not Done or
+  Cancelled.
+- One Work Order: `GET /api/work-orders/<KEY>`, plus `/comments`, `/acceptance` and `/issues` under it.
+
 ## 1. The task
 
 | Given | Do |
 |---|---|
-| A Work Order key | Read it as `/plan-itp --wo` does: `GET /api/work-orders/<KEY>` with the team's `teamspace` CLI. Check it is **held by the user** (`holderId` or `pairId` is their member id; state Picked or later). Not held: say so (drag it into In Progress, or be added as its pair) and ask whether to go on reading it anyway. Server not reachable: read the vault copy `ITPKV/3. Planning/Work Orders/<KEY>.md` (read only) and say it may be out of date. |
+| A Work Order key | Read it (**Reading Teamspace** above): the Work Order, its comments, acceptance tests and issues. Check it is **held by the user** (`holderId` or `pairId` is their member id; state Picked or later). Not held: say so (drag it into In Progress, or be added as its pair) and ask whether to go on reading it anyway. Server not reachable: read the vault copy `ITPKV/3. Planning/Work Orders/<KEY>.md` (read only) and say it may be out of date. |
 | A Jira key or link | The Atlassian tools (cloudId `orbitax.atlassian.net`): summary, description, status, comments, attachment names, parent epic. |
 | Plain words | That is the task. Ask one short question only if it is too vague to start. |
-| Nothing | Show a short table (key, title, state) of the Work Orders the user holds (`teamspace member-open-work <their email> --json`, read only; the email is `git config user.email`) and their open Jira tickets (`assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`), then ask which (AskUserQuestion, up to 4; any key or a job in words in "Other"). |
+| Nothing | Show a short table (key, title, state) of the Work Orders the user holds (`GET /api/me`, then `GET /api/members/<id>/working-on`) and their open Jira tickets (`assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`), then ask which (AskUserQuestion, up to 4; any key or a job in words in "Other"). |
 
 Write `.orchestra/task.md` (make the folder): `# <KEY> — <title>`, `Source:` (Work Order with Solution and Feature /
 Jira with link / your words), `State:`, `## The task` (a Work Order's spec in full: Problem, Who is affected, What

@@ -9,8 +9,8 @@ for ref in $(printf '%s\n' "$input" | awk '{ print $3 }'); do
   orchestra_is_main "${ref#refs/heads/}" && to_main=1
 done
 if [ -n "$to_main" ]; then
-  # One exception: the Wrap up step pushes the vault and the ITP folder, which live on main.
-  if orchestra_wrap_up && { orchestra_main_ok || orchestra_is_itp; }; then
+  # One exception: the Wrap up step pushes the folders that live on main (the pack's).
+  if orchestra_wrap_up && { orchestra_main_ok || orchestra_is_wrapup_dir; }; then
     :
   else
     orchestra_refuse "a push to the main branch is refused, even with Approve."

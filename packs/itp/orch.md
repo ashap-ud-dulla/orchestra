@@ -1,7 +1,8 @@
 
 # The ITP part (the ITP pack)
 
-- Never call Teamspace and never touch ITPKV from here. The runs do their own work in their own tabs.
+- Teamspace from here: only `orch mine` (it reads, never writes). Never call Teamspace any other way and never touch
+  ITPKV from here. The runs do their own work in their own tabs.
 - **Tracking off** = the run may not call Teamspace or write the vault; such a template refuses skills that do.
   `orch skills <words>` shows a "Writes to Teamspace/vault" column; to correct a wrong guess:
   `orch skill-mark <skill> writes|clean|auto`.
@@ -10,9 +11,10 @@
 
 ## Picking the task
 
-The first step of the ITP templates, **Pick the task** (`intake`), reads a Work Order (Teamspace, read only), a Jira
-ticket or a job in words, and with nothing given lists the Work Orders the user holds and their open Jira tickets in
-the run's tab. So from here: never call Teamspace, and do not list tickets: start the run (empty when none was named).
+- In **Pick work**, `orch mine` lists the **Work Orders** the user holds or pairs on (Teamspace, read only, through
+  ITP's own `registry_call GET`). Their Jira tickets come from the Atlassian tools (cloudId `orbitax.atlassian.net`).
+- Each run's first step, **Pick the task and the steps** (`intake`), then reads its Work Order (spec, comments,
+  acceptance tests, issues) or Jira ticket in its own tab, and suggests the steps.
 
 ## ITP templates and steps
 
@@ -39,7 +41,7 @@ launcher as runs (AppHost by default, per-service logs in `<checkout>/.run-logs/
   database" below) and say it in the question, with the active one first. Ask also whether to add Outsider (usually no).
   If the user picks the other DB, switch it before the start, so the app starts once on the right one.
 - **Ask about the Mission consumer too, in the same AskUserQuestion**, when the checkout has it (the folder
-  `{{ITP}}/ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer` exists; if not, do not ask).
+  `{{SOLUTION}}/ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer` exists; if not, do not ask).
   Options: **No (usually)**, first · **Yes**: it is needed only to test XatBot / Mission work. No adds
   `without=mission`: Orchestra then sends XatBot commands to Primary for this start (`ITP_MissionApis=","` in the
   AppHost settings), so they do not hang; the user's Debug.json is not changed.

@@ -1,6 +1,6 @@
 # Clicking a run's Windows notification lands here (the "orchestra-focus:<tab title>" link that lib/notify.mjs
 # registers for this Windows user). It finds the Windows Terminal tab with that title, selects it and brings its
-# window to the front. Claude puts a mark before the title ("* ITP2-14941"), so the tab name must end with it.
+# window to the front. Claude puts a mark before the title ("* ABC-123"), so the tab name must end with it.
 # The title is only compared as text; nothing in it runs. No tab with that title (closed): nothing happens.
 param([string]$Url)
 $ErrorActionPreference = 'Stop'

@@ -14,11 +14,11 @@ If Orchestra's prompt says the user went straight to this step to hand the work 
 to Samiul"), first write `.orchestra/handover.md` and show it, so the user can paste it to that person:
 - **The task**: its key and title, in one line (from `.orchestra/task.md` when it is there).
 - **What was found**: the cause, the trace, the decisions so far (from the steps' notes and the files on disk).
-- **What is done**: the steps that finished, and what each left (plan, epic, code on which branch, tests).
+- **What is done**: the steps that finished, and what each left (plan, code on which branch, tests).
 - **What is left**: the steps that were skipped, and anything open.
-- **Where things are**: branches and PR links, the epic folder, notes and trace files.
+- **Where things are**: branches and PR links, notes and trace files.
 
-Never post it anywhere by yourself (no Jira or Teamspace comment). Then go on with the usual jobs below.
+Never post it anywhere by yourself (no ticket or tracker comment). Then go on with the usual jobs below.
 
 ## 1. Look
 

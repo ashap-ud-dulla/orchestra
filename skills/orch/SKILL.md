@@ -1,7 +1,7 @@
 ---
 name: orch
 description: Orchestra, the user's personal workflow runner, from the terminal. Start tickets or jobs as runs (one terminal tab each), see the runs board, build templates from skills, find skills, lessons, stats and settings. Use when the user types /orch (with or without words after it) or asks to start tickets with a template, see their runs, reopen runs, or build a workflow template.
-argument-hint: "[tickets or work orders to start | or anything in plain words]"
+argument-hint: "[ticket keys to start | or anything in plain words]"
 allowed-tools: Bash(node {{ORCHESTRA}}/bin/orch.mjs *), AskUserQuestion, mcp__claude_ai_Atlassian__getAccessibleAtlassianResources, mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql
 ---
 
@@ -19,8 +19,8 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
 
 ## Rules
 
-- **Plain words are fine** everywhere: turn what the user says into the `orch` commands below ("hand ITP2-1 over to
-  Samiul" is `orch go ITP2-1 wrap-up handing over to Samiul`; "what is ITP2-1 doing" is `orch run ITP2-1`). In a run's
+- **Plain words are fine** everywhere: turn what the user says into the `orch` commands below ("hand ABC-1 over to
+  Sam" is `orch go ABC-1 wrap-up handing over to Sam`; "what is ABC-1 doing" is `orch run ABC-1`). In a run's
   tab they can talk in plain words too: the run's Claude passes moves on to Orchestra.
 - Do all Orchestra work through `orch`. Never edit files under `orchestra/runs` or `orchestra/data` by hand, and never
   start `claude` yourself: `orch start` / `orch reopen` open the run tabs.
@@ -42,8 +42,8 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
   **Go to any step**, back or forward: `/orch go build fix the review findings` (also `back`, `jump`, `from`; the step
   by number or name, then why). Back: that step and every step after it run again (no copies); what they did before
   stays as history ("try 1"), and the step is told why and what the later steps found. Forward: the steps between are
-  marked skipped (not done) and the step is told so: a handover is `/orch go wrap-up handing over to <name>` (pushing
-  the vault works only inside Wrap up). The step starts at once. The tab is split: the pane on the right shows the
+  marked skipped (not done) and the step is told so: a handover is `/orch go wrap-up handing over to <name>` (the Wrap up
+  step's jobs, like pushing notes the pack keeps on main, work only inside it). The step starts at once. The tab is split: the pane on the right shows the
   run's steps live (done / working now / to come). To see them in another terminal: `orch watch <ticket>` (Ctrl+C ends it).
 - **Pins**: below the steps, the pane keeps instructions the user follows by hand (test steps, values to pick), so
   they stay in sight while the user chats. The run's Claude pins steps by itself (an `ORCHESTRA:PIN` block). In the
@@ -56,8 +56,26 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
 
 1. Run `orch status` and show it, then say in one or two lines what needs the user (a question, a `next`, an Allow).
    If it has a "Left alone 7+ days" or "Finished, folder still there" line, offer **Clean up** once (see **Clean up**).
-2. Ask **Work on something new?** with **Yes** · **No**. Yes: `orch start` (no words): one run opens, and its first step
-   lists the Work Orders and tickets the user holds, in its tab, where they pick. Say so in one line.
+2. Ask **Work on something new?** with **Yes** · **No**. Yes: **Pick work** below.
+
+## Pick work
+
+The user picks here, in this tab; each pick then opens its own run, which plans itself in its tab.
+
+1. Get what the user holds, both at once:
+   - `orch mine --json`: the work they hold in their solution's own tracker, from its pack (read only). `problem` set:
+     say it in one line and go on with the rest.
+   - Their open Jira tickets, if the Atlassian tools are connected: `searchJiraIssuesUsingJql` with jql
+     `assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`, maxResults 30, fields
+     `summary,status`, the cloudId from `getAccessibleAtlassianResources` (once). Not connected: skip it silently.
+     Read only: never change a ticket.
+2. Mark the ones that have a run already: `orch mine` gives `run`; for the tickets, `orch runs all --json` (the run's
+   key is its tab name).
+3. Show **one numbered table**, `orch mine`'s items first, then the tickets: #, Key, Title, State, Kind (its `kind`, or
+   "Jira"), Run. Then ask in plain text (not AskUserQuestion: it shows only 4): **Which ones? Type numbers or keys
+   ("1, 3, 4", "all without a run"), or a job in words.**
+4. Start them all at once: **Start run(s)** below, with the keys picked (a picked one with a run: ask first, then
+   `again=yes`). Nothing held and nothing typed: ask what to work on.
 
 ## Words after /orch: plain words
 
@@ -65,12 +83,13 @@ The user remembers nothing but `/orch`. Read what they wrote and do it with `orc
 
 | They say | Do |
 |---|---|
-| Keys or links, pasted (`ITP2-15005, TSP-W-001, CLIS-688`), or jobs in words | **Start run(s)** below |
+| Keys or links, pasted (`ABC-12, ABC-15, XYZ-3`), or jobs in words | **Start run(s)** below |
+| "what do I have", "my tickets", "pick work" | **Pick work** |
 | "what's running", "what needs me", "board" | `orch status` / `orch runs` |
-| "how is ITP2-1", "what did CLIS-688 find" | `orch run <ticket>` (`full=yes` for every note) |
-| "go back to build on ITP2-1", "start again from step 5", "skip to wrap up", "hand ITP2-1 to Samiul", "wrap up CLIS-688" | `orch go <ticket> <step> [why]` (a hand-over or a wrap-up is `go <ticket> wrap-up <why>`). Going forward skips the steps between, and going back runs them again: say which in one line and ask first. It starts at once when Claude in that tab is idle; while it works, say to type it in the tab |
-| "next / skip / redo on ITP2-1" | `orch next|skip|redo <ticket>` |
-| "use opus for ITP2-1" | `orch model <ticket> opus [effort=…]` |
+| "how is ABC-1", "what did XYZ-9 find" | `orch run <ticket>` (`full=yes` for every note) |
+| "go back to build on ABC-1", "start again from step 5", "skip to wrap up", "hand ABC-1 to Sam", "wrap up XYZ-9" | `orch go <ticket> <step> [why]` (a hand-over or a wrap-up is `go <ticket> wrap-up <why>`). Going forward skips the steps between, and going back runs them again: say which in one line and ask first. It starts at once when Claude in that tab is idle; while it works, say to type it in the tab |
+| "next / skip / redo on ABC-1" | `orch next|skip|redo <ticket>` |
+| "use opus for ABC-1" | `orch model <ticket> opus [effort=…]` |
 | "change the steps of …", "add a code review to …" | `orch steps <ticket or template> add|remove|set|move …` (show the result) |
 | "reopen", "after a restart" | `orch reopen all` / `orch reopen <ticket>` |
 | "stop", "delete" | the same `orch` command (ask before `delete`) |
@@ -84,9 +103,9 @@ When unsure what they mean, ask one short question with options.
 
 ## Start run(s)
 
-1. **Each key or quoted job makes one run** (split pasted lists on commas, spaces or lines). Keys: a Jira key, a Work
-   Order key (`TSP-W-001`), a link. A job in words is quoted: `"Add a Sweden row"`. A text that only mentions a ticket
-   ("same fix as ITP2-1, but for Sweden") is a job, not that ticket.
+1. **Each key or quoted job makes one run** (split pasted lists on commas, spaces or lines). Keys: any tracker's key
+   (`ABC-123`), or a link to it. A job in words is quoted: `"Add a Sweden row"`. A text that only mentions a ticket
+   ("same fix as ABC-1, but for Sweden") is a job, not that ticket.
 2. **No template needed**: `orch start <keys…>`. Each run's first step, **Pick the task and the steps**, reads its
    task, suggests the steps that fit (one of the user's templates, changed for it, with a cost and time estimate) and
    asks, in the run's tab. Only when the user names a template: `orch start <template> <keys…>`.
@@ -100,7 +119,7 @@ When unsure what they mean, ask one short question with options.
 2. Ask what next, with options like: **Open a run** (`orch run <ticket>`) · **Reopen stopped runs** (`orch reopen all`)
    · **Clean up** (see **Clean up**) · **Stop a run** (`orch stop <ticket>`).
 3. For one run, `orch run <ticket>` shows its steps, notes ("what I did and why"), recent activity and the
-   PR links and epic ("Shipped"). Explain the "Now:" line in plain words.
+   PR links and what else it shipped ("Shipped"). Explain the "Now:" line in plain words.
 4. Each run says in one line what its ticket is about (the "About" column, the top of its steps pane). The run's
    Claude writes it once it reads the ticket. To set or fix it by hand: `orch about <ticket> "the summary"`.
 5. `delete` removes the run from Stats too: ask first, and suggest `clean` instead when they only want the space back.
@@ -133,25 +152,25 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
 
 - **Find skills**: `orch skills <words>`.
 - **New template**: ask for a short id (like `jira-to-pr`), a name, and the steps in plain words
-  ("grill-itp, then plan-itp and wait for me, then execute-epics, it uses the app"). Then:
-  `orch template new <id> <first-skill> name="Name" [tracking=off] [repos=api,webclient]`
+  ("orch-plan and wait for me, then orch-build, then orch-review"). Then:
+  `orch template new <id> <first-skill> name="Name" [tracking=off] [repos=a,b]`
   and one `orch steps <id> add <skill> [wait=on] [app=on] [explain=on] [label="…"] [args="…"]` per further step.
   Find skill names with `orch skills <words>` when unsure. Show the result with `orch template show <id>`.
 - **Change a template**: turn their words into commands, one change at a time, and show the template after:
   `steps <id> add <skill>` (`after=<step>` or `at=N` for a place), `steps <id> remove <step>`, `steps <id> move <step> to=N`,
   `steps <id> set <step> wait=on|off app=on|off explain=on|off label="…" args="…"`,
-  `template set <id> name="…" tracking=on|off repos=api,webclient`, `template copy <id> <new-id>`, `template delete <id>` (ask first).
+  `template set <id> name="…" tracking=on|off repos=a,b`, `template copy <id> <new-id>`, `template delete <id>` (ask first).
 - Step options in plain words: **wait** = stop after this step until the user types `next`; **app** = this step starts
   the app (one run at a time); **explain** = after this step, walk the user through the code changes.
 - **New conversation per step** (`fresh=on`): the step starts a new conversation instead of carrying the whole
-  history (the biggest cost: every request re-reads it). It gets a short story of the earlier steps; plans, epics
+  history (the biggest cost: every request re-reads it). It gets a short story of the earlier steps; plans
   and code are on disk. Good for steps that read from disk (Build, code review, Wrap up); not for a step that needs
   the talk before it (a plan right after its grill). `steps <id> set <step> fresh=on|off`.
 - **Model and effort per step**: `steps <id> set <step> model=opus|sonnet|haiku|fable|none effort=low|medium|high|xhigh|max|ultracode|none`
   (`template set <id> model=… effort=…` sets the template's default; `steps <id> add … model=… effort=…`).
   A step with none keeps the one before. When the next step wants another model or effort, Orchestra restarts the
   run's claude in the same tab, on the same conversation (a few seconds; changing the model re-reads the chat once at
-  full price). Usual split: opus for thinking steps (grill, plan, epic, review), sonnet for code (build, app test).
+  full price). Usual split: opus for thinking steps (grill, plan, review), sonnet for code (build, app test).
   **The step a run is on, now** ("use opus for this step"): `orch model <ticket> <model> [effort]` changes only that
   run. A step working now switches when the user types `/orch model` in the run's tab (Orchestra never restarts
   it from outside: that could cut claude off mid-work); tell them so. Typing `/orch model opus effort=ultracode`
