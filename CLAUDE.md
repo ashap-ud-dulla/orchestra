@@ -67,6 +67,12 @@ Orchestra only touches ITP in four ways (all through `packs/itp`):
   tab stays free, its slot is freed, and once the app is free its idle claude is restarted on the same conversation
   with the step (`startAppWaiters`, via `restart.ok`). Notifications only for an Allow prompt, a question, a next
   gate, a failure. Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
+- Tabs open one at a time (`bin/open-tab.mjs`, the `runs/.tab-lock` folder): a tab is "new-tab ; split-pane", and wt
+  splits the tab in focus, so two at once put one run's steps pane in another run's tab.
+- Processes a run leaves: helpers claude starts can lose their parent and need not name the run folder. The launcher
+  writes claude's tree down (`runs/<id>/procs.json`, pid + start time; `recordTree` in `lib/app.mjs`) soon after
+  each start, every 2 minutes and before a restart; clean and delete stop what of it still runs (`stopRunProcesses`),
+  and a folder that stays busy is retried for 15 s, then refused with a plain error (the same command again finishes).
 - Clean-up happens only when the user says so: it stops what runs from the run folder, removes the folder, prunes
   git's worktree records and removes the run's Claude conversation files. Branches, notes and stats stay.
   The usual way is the last template step `wrap-up` (personal skill), in the run's own tab: the user picks

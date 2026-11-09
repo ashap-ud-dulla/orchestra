@@ -8,8 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { childEnv } from '../lib/env.mjs';
 import { withRunner } from '../lib/runner.mjs';
-import { runDir, RESTART_FLAG, TAB_ALIVE } from '../lib/store.mjs';
-import { killTree } from '../lib/app.mjs';
+import { runDir, RESTART_FLAG, TAB_ALIVE, PROCS_FILE } from '../lib/store.mjs';
+import { killTree, recordTree } from '../lib/app.mjs';
 
 const [runId, token] = process.argv.slice(2);
 // Time for the Stop hook that asked for the restart to finish before claude is stopped.
@@ -29,18 +29,31 @@ async function closed(code, opts) {
   process.exit(code ?? 0);
 }
 
+// Claude's tree is written down soon after it starts (helper servers start then, and some lose their parent within
+// seconds), then every 2 minutes, and once more before a restart stops it. Clean-up stops what of it still runs.
+const RECORD_AT_MS = (process.env.ORCHESTRA_RECORD_AT_MS || '3000,8000,15000,30000,60000').split(',').map(Number);
+const RECORD_EVERY_MS = Number(process.env.ORCHESTRA_RECORD_EVERY_MS ?? 120000);
+
 function start(spec) {
   const env = childEnv(spec.env, { keepApiKey: spec.keepApiKey });
   const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env, stdio: 'inherit' });
   const flag = path.join(runDir(runId), RESTART_FLAG);
+  const procs = path.join(runDir(runId), PROCS_FILE);
+  const record = () => recordTree(procs, child.pid).catch(() => {});
+  const timers = [...RECORD_AT_MS.map((ms) => setTimeout(record, ms)), setInterval(record, RECORD_EVERY_MS)];
+  const stopRecording = () => timers.forEach((t) => clearTimeout(t));
   let restarting = false;
   const watch = setInterval(() => {
     if (restarting || !fs.existsSync(flag)) return;
     restarting = true;
-    setTimeout(() => killTree(child.pid), RESTART_GRACE_MS);
+    setTimeout(async () => {
+      await record();
+      killTree(child.pid);
+    }, RESTART_GRACE_MS);
   }, 250); // a quick look (one file check), so a model switch starts without dead time
   child.on('error', async (err) => {
     clearInterval(watch);
+    stopRecording();
     // Tell Orchestra first, so the run says "failed: claude could not start" instead of "running".
     try {
       await withRunner((r) => r.onClosed(runId, token, { error: err.message }), { detach: true, lockMs: 20000 });
@@ -49,6 +62,7 @@ function start(spec) {
   });
   child.on('exit', async (code) => {
     clearInterval(watch);
+    stopRecording();
     if (!restarting && !fs.existsSync(flag)) return closed(code);
     // Claude was stopped on purpose: put the terminal back in order (colors, cursor, screen), then start it again.
     process.stdout.write('\x1b[0m\x1b[?25h\x1b[?1049l\x1b[?2004l\x1b[?1000l\x1b[?1006l\n');

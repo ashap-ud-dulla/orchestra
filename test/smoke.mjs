@@ -2583,6 +2583,60 @@ test('orch: free-text runs get a short name from their words and are found by wo
   }
 });
 
+test('clean-up: a helper claude started that lost its parent is still stopped; a busy folder is retried, then named', async () => {
+  const { recordTree, killRecorded } = await import('../lib/app.mjs');
+  const { removeFolder } = await import('../lib/workspace.mjs');
+  const { stopRunProcesses } = await import('../lib/run/cleanup.mjs');
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const ws = fs.mkdtempSync(path.join(tmp, 'orphan-ws-'));
+  const procs = path.join(tmp, `procs-${Date.now()}.json`);
+  // A parent (like an MCP start script) starts a helper in the run folder, then ends: the helper has no parent left,
+  // and its command line does not name the folder (only its working folder is there).
+  const parent = spawn(process.execPath, ['-e', "const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',cwd:process.cwd()});c.unref();console.log(c.pid);setTimeout(()=>{},4000)"], { cwd: ws, stdio: ['ignore', 'pipe', 'ignore'] });
+  const helper = Number(await new Promise((r) => parent.stdout.once('data', (d) => r(String(d).trim()))));
+  await waitFor(async () => {
+    await recordTree(procs, parent.pid);
+    return fs.existsSync(procs) && JSON.parse(fs.readFileSync(procs, 'utf8')).some((p) => p.pid === helper);
+  }, 'the launcher records claude\'s tree');
+  parent.kill();
+  await waitFor(() => !alive(parent.pid), 'the parent ends');
+  assert.ok(alive(helper), 'the helper outlives its parent');
+  // The folder is held: removing it waits, then says plainly what to do.
+  process.env.ORCHESTRA_RM_WAIT_MS = '1500';
+  try {
+    await assert.rejects(removeFolder(ws), /still in use by another program .*run the same command again/);
+    assert.ok(stopRunProcesses(ws, procs) >= 1, 'the recorded helper is stopped');
+    await waitFor(() => !alive(helper), 'the helper ends');
+    assert.equal(killRecorded(procs), 0, 'nothing of the record runs any more');
+    await removeFolder(ws);
+    assert.ok(!fs.existsSync(ws), 'the folder goes once nothing holds it');
+  } finally {
+    delete process.env.ORCHESTRA_RM_WAIT_MS;
+    if (alive(helper)) process.kill(helper);
+  }
+});
+
+test('tabs open one at a time: two openers at once never overlap (a pane cannot land in another run\'s tab)', async () => {
+  const log = path.join(tmp, `tab-open-${Date.now()}.log`).replace(/\\/g, '/');
+  // A stand-in for wt: writes when it starts and ends, and takes a while.
+  const fake = (name) => Buffer.from(JSON.stringify([process.execPath, '-e', `const f=require('fs');f.appendFileSync(${JSON.stringify(log)},'start ${name}\\n');setTimeout(()=>f.appendFileSync(${JSON.stringify(log)},'end ${name}\\n'),400)`])).toString('base64');
+  const opener = path.join(ROOT, 'bin/open-tab.mjs');
+  const extraEnv = { ORCHESTRA_TAB_GAP_MS: '200' };
+  await Promise.all([proc([opener, fake('a')], { extraEnv }), proc([opener, fake('b')], { extraEnv })]);
+  const lines = fs.readFileSync(log, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /^start/);
+  assert.equal(lines[1].replace('end', 'start'), lines[0], `one finishes before the other starts: ${lines.join(' | ')}`);
+  assert.ok(!fs.existsSync(path.join(runsDir, '.tab-lock')), 'the lock is let go');
+});
+
 test('lock: a lock left by a dead process is taken over; many hooks at once lose nothing', async () => {
   fs.mkdirSync(path.join(runsDir, '.lock'), { recursive: true });
   fs.writeFileSync(path.join(runsDir, '.lock', 'owner.json'), JSON.stringify({ pid: 999999, at: Date.now() }));
