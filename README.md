@@ -101,8 +101,9 @@ In a run's tab, just talk to it. `next`, `skip` and `redo` move it; `/orch model
 
 - **Your checkout is never touched.** Every run works in its own git worktree under `C:/o`. Edits to your own
   checkout from a run are refused.
-- **No push to main.** Orchestra's git hooks (set through environment variables only; nothing is written into your
-  repos) refuse commits and pushes to `main`/`master`. Every other push shows you an Allow prompt first.
+- **Every push asks you.** Each push shows you an Allow prompt first, a push to `main`/`master` too (Orchestra's
+  git hooks are set through environment variables only; nothing is written into your repos). A run works on its own
+  branch and goes to main only when you ask.
 - **Nothing is cleaned without you.** A run's folder goes only when you say so; branches, notes and stats stay.
 - **One app at a time.** When a pack can start your app, runs wait in line for it; your own running app is never
   stopped without your OK.

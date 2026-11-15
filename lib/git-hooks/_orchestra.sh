@@ -82,10 +82,12 @@ orchestra_is_main() {
   [ -n "$def" ] && [ "$1" = "${def#origin/}" ]
 }
 
-# Refuses work on main, except in the folders allowed on main, and in the Wrap up folders while that step works.
+# Work on main is fine (the run's Claude asks you first; every push asks you). One refusal: the Wrap up folders (the
+# pack's own folder) take commits only while that step works.
 orchestra_no_main() {
   orchestra_is_main "$(orchestra_branch)" || return 0
   orchestra_main_ok && return 0
-  orchestra_wrap_up && orchestra_is_wrapup_dir && return 0
-  orchestra_refuse "work on the main branch is refused. Use the run's work branch."
+  orchestra_is_wrapup_dir || return 0
+  orchestra_wrap_up && return 0
+  orchestra_refuse "this folder takes commits only in the Wrap up step."
 }

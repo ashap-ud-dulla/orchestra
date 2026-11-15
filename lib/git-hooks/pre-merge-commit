@@ -1,5 +1,5 @@
 #!/bin/sh
-# Orchestra: no commits, merges or rebases on the main branch (the folders allowed on main excepted).
+# Orchestra: the Wrap up folders (the pack's own folder) take commits, merges and rebases on main only in Wrap up.
 . "$(dirname "$0")/_orchestra.sh"
 orchestra_no_main
 orchestra_chain pre-merge-commit "$@"

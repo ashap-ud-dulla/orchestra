@@ -1,7 +1,7 @@
 #!/bin/sh
-# Orchestra: a push to main (or master, or with no pack the remote's default branch) is always refused. Other pushes
-# need ORCHESTRA_ALLOW_PUSH=1; a run's terminal session sets it, because there Claude asks you before every push
-# (the PreToolUse guard).
+# Orchestra: every push needs ORCHESTRA_ALLOW_PUSH=1; a run's terminal session sets it, because there Claude asks
+# you before every push, a push to main too (the PreToolUse guard). The folders the pack keeps on main (its notes,
+# its own folder) push to main only while the Wrap up step works.
 . "$(dirname "$0")/_orchestra.sh"
 input=$(cat)
 to_main=
@@ -9,11 +9,8 @@ for ref in $(printf '%s\n' "$input" | awk '{ print $3 }'); do
   orchestra_is_main "${ref#refs/heads/}" && to_main=1
 done
 if [ -n "$to_main" ]; then
-  # One exception: the Wrap up step pushes the folders that live on main (the pack's).
-  if orchestra_wrap_up && { orchestra_main_ok || orchestra_is_wrapup_dir; }; then
-    :
-  else
-    orchestra_refuse "a push to the main branch is refused, even with Approve."
+  if { orchestra_main_ok || orchestra_is_wrapup_dir; } && ! orchestra_wrap_up; then
+    orchestra_refuse "this folder is pushed to main only in the Wrap up step."
   fi
 fi
 if [ "$ORCHESTRA_ALLOW_PUSH" != "1" ]; then
