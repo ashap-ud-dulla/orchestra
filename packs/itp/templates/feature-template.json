@@ -72,7 +72,7 @@
       "wait": true,
       "model": "sonnet",
       "effort": "high",
-      "heavy": true
+      "app": true
     },
     {
       "id": "ai-itp-code-reviewer",

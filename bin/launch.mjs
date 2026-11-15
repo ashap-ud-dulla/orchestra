@@ -10,6 +10,8 @@ import { childEnv } from '../lib/env.mjs';
 import { withRunner } from '../lib/runner.mjs';
 import { runDir, RESTART_FLAG, TAB_ALIVE, PROCS_FILE } from '../lib/store.mjs';
 import { killTree, recordTree } from '../lib/app.mjs';
+import { showTitle } from '../lib/terminal.mjs';
+import { upgradeRun } from '../lib/upgrade.mjs';
 
 const [runId, token] = process.argv.slice(2);
 // Time for the Stop hook that asked for the restart to finish before claude is stopped.
@@ -100,6 +102,21 @@ const beat = () => {
 };
 beat();
 setInterval(beat, 10000).unref();
+
+// The tab's name shows the run's mark (🔴 needs you, ⏳ in line, ✅ done): the run file is read again only when it
+// changed (one file check every 2 s).
+const stateFile = path.join(runDir(runId), 'state.json');
+let stateAt = 0;
+const mark = () => {
+  try {
+    const at = fs.statSync(stateFile).mtimeMs;
+    if (at === stateAt) return;
+    showTitle(upgradeRun(JSON.parse(fs.readFileSync(stateFile, 'utf8'))));
+    stateAt = at; // only after a good read: a file caught mid-write is read again next time
+  } catch {}
+};
+mark();
+setInterval(mark, 2000).unref();
 
 if (spec) {
   console.log(`Orchestra run ${runId} · ${spec.title}`);

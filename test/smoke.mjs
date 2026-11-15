@@ -20,6 +20,26 @@ import { computeStats } from '../lib/stats.mjs';
 import { material, parseSuggestions } from '../lib/learn.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// A test run that was cut off (Ctrl+C, a crash) never reaches its clean-up: the apps its runs started (fake-app.mjs)
+// keep running and hold its folder. Each run stops what a test folder holds: the earlier runs' at the start (and
+// removes their folders), its own at the end. So run one test run at a time (two at once would stop each other's).
+function stopTestApps(dir) {
+  const want = dir.replace(/\\/g, '/').toLowerCase();
+  const out = spawnSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { '{0}\t{1}' -f $_.ProcessId, $_.CommandLine }`], { encoding: 'utf8', windowsHide: true }).stdout || '';
+  for (const line of out.split('\n')) {
+    const [pid, cmd = ''] = line.replace(/\r$/, '').split('\t');
+    const c = cmd.replace(/\\/g, '/').toLowerCase();
+    if (Number(pid) && c.includes('test/fake-app.mjs') && c.includes(want)) spawnSync('taskkill', ['/PID', pid, '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  }
+}
+const OLD_TESTS = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('orchestra-test-')).map((n) => path.join(os.tmpdir(), n));
+for (const dir of OLD_TESTS) {
+  stopTestApps(path.basename(dir));
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  } catch {} // still busy: tried again next time
+}
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-test-'));
 const dataDir = path.join(tmp, 'data');
 const runsDir = path.join(tmp, 'runs');
@@ -227,15 +247,18 @@ test('child claude gets no API key and no parent-session variables', () => {
   assert.equal(env.X, '1');
 });
 
-test('guard: push and PR need your OK; main and --no-verify are always refused', () => {
+test('guard: push and PR need your OK, main too; --no-verify is always refused', () => {
   const v = (command, allow = false) => check('Bash', { command }, { ORCHESTRA_ALLOW_PUSH: allow ? '1' : '0' });
   for (const c of ['git push', 'git push -u origin feature/x', 'cd repo && git -C x push origin y', 'gh pr create --fill']) {
     assert.equal(v(c)?.needsApproval, true, c);
     assert.equal(v(c, true), null, `${c} when allowed`);
   }
-  for (const c of ['git push origin main', 'git push origin HEAD:main', 'git push origin feature/x --no-verify', 'git checkout main', 'git switch main']) {
-    assert.equal(v(c, true)?.needsApproval, false, `${c} refused always`);
+  for (const c of ['git push origin main', 'git push origin HEAD:main']) {
+    assert.equal(v(c)?.needsApproval, true, `${c} asks you`);
+    assert.equal(v(c, true), null, `${c} when allowed`);
   }
+  for (const c of ['git checkout main', 'git switch main']) assert.equal(v(c, true)?.needsApproval, true, `${c} asks you`);
+  assert.equal(v('git push origin feature/x --no-verify', true)?.needsApproval, false, '--no-verify refused always');
   for (const c of ['git status', 'git log origin/main', 'git merge-base HEAD origin/main', 'git checkout main -- file.txt', 'echo push', 'git commit -m "push later"']) {
     assert.equal(v(c), null, c);
   }
@@ -243,14 +266,15 @@ test('guard: push and PR need your OK; main and --no-verify are always refused',
   assert.equal(check('Read', { file_path: 'x' }, {}), null);
 });
 
-test('guard hook: a push gets Claude\'s Allow prompt; a push to main is refused', () => {
+test('guard hook: a push gets Claude\'s Allow prompt, a push to main too', () => {
   const run = (command) => spawnSync(process.execPath, [path.join(ROOT, 'lib/guard-hook.mjs')], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }), encoding: 'utf8', env: { ...process.env, ORCHESTRA_ALLOW_PUSH: '1' } });
   const ask = run('git push -u origin epics/x');
   assert.equal(ask.status, 0);
   assert.equal(JSON.parse(ask.stdout).hookSpecificOutput.permissionDecision, 'ask', 'asked even though the session allows pushes');
   const main = run('git push origin main');
-  assert.equal(main.status, 2);
-  assert.match(main.stderr, /main branch/);
+  assert.equal(main.status, 0);
+  assert.equal(JSON.parse(main.stdout).hookSpecificOutput.permissionDecision, 'ask');
+  assert.match(JSON.parse(main.stdout).hookSpecificOutput.permissionDecisionReason, /main branch/);
   assert.equal(run('git status').status, 0);
 });
 
@@ -277,7 +301,7 @@ test('the reply is read from the transcript when the hook does not send it', () 
   assert.equal(lastReply({ transcript_path: path.join(tmp, 'nope.jsonl') }), '');
 });
 
-test('git hooks: push waits for Approve, main is refused, the repo hook still runs', () => {
+test('git hooks: push waits for Approve, main too; the repo hook still runs', () => {
   const t = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestra-git-'));
   const git = (args, extra = {}) => spawnSync('git', args, { cwd: path.join(t, 'work'), encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...extra } });
   try {
@@ -297,18 +321,21 @@ test('git hooks: push waits for Approve, main is refused, the repo hook still ru
     assert.notEqual(blocked.status, 0);
     assert.match(blocked.stderr, /needs the user's Approve/);
     assert.equal(git(['push', '-q', 'origin', 'feature/x'], guard(true)).status, 0, 'allowed when the session allows pushes');
-    assert.match(git(['push', '-q', 'origin', 'feature/x:main'], guard(true)).stderr, /main branch is refused/);
+    assert.match(git(['push', '-q', 'origin', 'feature/x:main'], guard(false)).stderr, /needs the user's Approve/);
+    assert.equal(git(['push', '-q', 'origin', 'feature/x:main'], guard(true)).status, 0, 'a push to main after your Allow');
     git(['checkout', '-q', 'main']);
+    git(['merge', '-q', '--ff-only', 'feature/x'], guard(false));
     fs.writeFileSync(path.join(t, 'work', 'c'), 'c');
     git(['add', 'c']);
-    assert.match(git(['commit', '-qm', 'c'], guard(false)).stderr, /main branch is refused/);
-    // The vault is committed on main by design: allowed there, and only there. Pushing it to main is still refused.
+    assert.equal(git(['commit', '-qm', 'c'], guard(false)).status, 0, 'a commit on main of a code repo is fine');
+    // The vault is committed on main by design; it pushes to main only in Wrap up.
     const vault = { ...guard(true), ORCHESTRA_MAIN_OK: `C:/elsewhere/ITPKV\n${path.join(t, 'work')}` };
-    assert.match(git(['commit', '-qm', 'c'], { ...guard(false), ORCHESTRA_MAIN_OK: 'C:/elsewhere/ITPKV' }).stderr, /main branch is refused/);
-    assert.equal(git(['commit', '-qm', 'c'], vault).status, 0, 'a vault commit on main');
-    assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /main branch is refused/);
+    fs.writeFileSync(path.join(t, 'work', 'c2'), 'c');
+    git(['add', 'c2']);
+    assert.equal(git(['commit', '-qm', 'c2'], vault).status, 0, 'a vault commit on main');
+    assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /only in the Wrap up step/);
     assert.equal(check('Bash', { command: 'git -C ITPKV checkout main' }, {}), null, 'the vault may stay on main');
-    assert.ok(check('Bash', { command: 'git -C ITP-API checkout main' }, {}));
+    assert.equal(check('Bash', { command: 'git -C ITP-API checkout main' }, {})?.needsApproval, true, 'a code repo asks you');
     git(['checkout', '-q', 'feature/x']);
     fs.writeFileSync(path.join(t, 'work', '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho REPO-HOOK-RAN >&2\n', { mode: 0o755 });
     fs.writeFileSync(path.join(t, 'work', 'd'), 'd');
@@ -336,7 +363,7 @@ test('wrap up: only while its step works may the pack\'s wrap-up folder commit i
     fs.mkdirSync(path.join(itp, 'Execution'));
     fs.writeFileSync(path.join(itp, 'Execution', 'e.json'), '{}');
     git(['add', '.']);
-    assert.match(git(['commit', '-qm', 'e'], env()).stderr, /main branch is refused/, 'not outside Wrap up');
+    assert.match(git(['commit', '-qm', 'e'], env()).stderr, /only in the Wrap up step/, 'not outside Wrap up');
     flag(true);
     assert.equal(git(['commit', '-qm', 'e'], env()).status, 0, 'an Execution file on main, in Wrap up');
     fs.writeFileSync(path.join(itp, 'other.txt'), 'x');
@@ -347,25 +374,27 @@ test('wrap up: only while its step works may the pack\'s wrap-up folder commit i
     flag(false);
     fs.writeFileSync(path.join(itp, 'Execution', 'f.json'), '{}');
     git(['add', 'Execution/f.json']);
-    assert.match(git(['commit', '-qm', 'f'], env()).stderr, /main branch is refused/, 'refused again after it');
+    assert.match(git(['commit', '-qm', 'f'], env()).stderr, /only in the Wrap up step/, 'refused again after it');
     // The vault pushes to main only in Wrap up too.
     const vault = env({ ORCHESTRA_WRAPUP_DIRS: 'C:/elsewhere', ORCHESTRA_MAIN_OK: itp });
     assert.equal(git(['commit', '-qm', 'f'], vault).status, 0, 'a vault commit on main');
-    assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /main branch is refused/);
+    assert.match(git(['push', '-q', 'origin', 'main'], vault).stderr, /only in the Wrap up step/);
     flag(true);
     assert.equal(git(['push', '-q', 'origin', 'main'], vault).status, 0, 'the vault push in Wrap up');
     // The Claude guard: the same, and the run's own folder is out of reach.
     const g = { ORCHESTRA_RUN_DIR: run, ORCHESTRA_WRAPUP_DIRS: 'C:/Work/ITP' };
     assert.equal(check('Bash', { command: 'git -C C:/Work/ITP push origin main' }, g)?.needsApproval, true);
     assert.equal(check('Bash', { command: 'git -C "C:\\Work\\ITP" push origin main' }, g)?.needsApproval, true);
-    assert.equal(check('Bash', { command: 'git -C C:/Work/ITP/ITP-API push origin main' }, g)?.needsApproval, false, 'a repo inside ITP is not ITP');
+    assert.equal(check('Bash', { command: 'git -C C:/Work/ITP/ITP-API push origin main' }, g)?.needsApproval, true, 'a code repo asks you');
     assert.equal(check('Write', { file_path: path.join(run, 'state.json') }, g)?.needsApproval, false);
     assert.equal(check('Bash', { command: 'touch "$ORCHESTRA_RUN_DIR/wrap-up.ok"' }, g)?.needsApproval, false);
     // The vault, named as the pack names it, may push in Wrap up too.
     assert.equal(check('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run })?.needsApproval, true);
-    // No pack: no place on main.
-    assert.equal(checkWith('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run }, false)?.needsApproval, false);
+    // No pack: no place on main, so it only asks you.
+    assert.equal(checkWith('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run }, false)?.needsApproval, true);
     flag(false);
+    assert.equal(check('Bash', { command: 'git -C ITPKV push origin main' }, { ORCHESTRA_RUN_DIR: run })?.needsApproval, false, 'the vault outside Wrap up');
+    assert.equal(check('Bash', { command: 'git -C C:/Work/ITP/ITP-API push origin main' }, g)?.needsApproval, true, 'a code repo asks you outside Wrap up too');
     assert.equal(check('Bash', { command: 'git -C C:/Work/ITP push origin main' }, g)?.needsApproval, false, 'refused outside Wrap up');
   } finally {
     fs.rmSync(t, { recursive: true, force: true, maxRetries: 5 });
@@ -447,8 +476,9 @@ test('models: a step with another model or effort restarts claude on the same co
   assert.equal(a[a.indexOf('--model') + 1], 'opus');
   assert.equal(a[a.indexOf('--effort') + 1], 'high');
   const set = JSON.parse(a[a.indexOf('--settings') + 1]);
-  assert.deepEqual(set.enabledMcpjsonServers, ['opensearch', 'jira', 'bitbucket', 'mongodb', 'mongodb-app', 'mongodb-global'], 'the servers runs use, with no prompt');
+  assert.deepEqual(set.enabledMcpjsonServers, ['jira', 'bitbucket'], 'the light servers runs use, with no prompt; the heavy ones only where used');
   assert.ok(set.disabledMcpjsonServers.includes('FM-MCP') && set.disabledMcpServers.includes('FM-MCP'), 'a lighter session');
+  assert.ok(['mongodb', 'mongodb-app', 'mongodb-global', 'opensearch'].every((s) => set.disabledMcpjsonServers.includes(s)), 'Mongo and the log search stay off in this step');
   assert.equal(set.enabledPlugins['cowork-plugin-management@synced'], false);
   assert.equal(set.enableArtifact, false);
   assert.equal(spec.env.CLAUDE_CODE_DISABLE_WORKFLOWS, '1', 'no helper-agent workflows unless the step asks for ultracode');
@@ -638,6 +668,53 @@ test('go forward: jump to Wrap up for a handover; the steps between are skipped,
   fs.rmSync(path.join(dataDir, 'templates', 'go-demo.json'));
 });
 
+test('skills new: the solution\'s skills since you last looked; the first look keeps only this month\'s; seen marks them', async () => {
+  const data = path.join(tmp, `seen-data-${Date.now()}`);
+  const itp = path.join(tmp, `seen-itp-${Date.now()}`);
+  const skill = (name, days) => {
+    const dir = path.join(itp, '.claude', 'skills', name);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'SKILL.md');
+    fs.writeFileSync(file, `---\nname: ${name}\ndescription: ${name} does a thing\n---\nBody.\n`);
+    const t = new Date(Date.now() - days * 86400000);
+    fs.utimesSync(file, t, t);
+  };
+  skill('old-one', 90);
+  skill('fresh-one', 2);
+  const env2 = { ORCHESTRA_DATA_DIR: data, ORCHESTRA_SOLUTION_ROOT: itp.replace(/\\/g, '/') };
+  const run = async (...args) => JSON.parse((await proc([path.join(ROOT, 'bin/orch.mjs'), ...args, '--json'], { extraEnv: env2 })).out);
+  fs.mkdirSync(data, { recursive: true });
+  // The first look goes by the older of a SKILL.md's birth and change time.
+  const first = (await run('skills', 'new')).map((s) => s.name);
+  assert.ok(first.includes('fresh-one'), 'this month\'s skill is new');
+  assert.ok(!first.includes('old-one'), 'an old skill counts as seen on the first look');
+  await run('skills', 'seen', 'fresh-one');
+  assert.ok(!(await run('skills', 'new')).some((s) => s.name === 'fresh-one'), 'seen by name');
+  skill('brand-new', 0);
+  assert.deepEqual((await run('skills', 'new')).map((s) => s.name).filter((n) => n === 'brand-new'), ['brand-new'], 'a skill that comes later is new');
+  await run('skills', 'seen');
+  assert.deepEqual(await run('skills', 'new'), [], 'all seen');
+});
+
+test('about: a title from the pick list shows at once; the run\'s own summary (said while it still asks) replaces it; yours stays', async () => {
+  const { body: started } = await orch('start', 'demo-hello-recap', 'ABC-77');
+  const run = await waitFor(async () => { const r = await getRun(started.id); return r.session?.open ? r : null; }, 'its tab to open');
+  await hook(run, 'SessionStart', { session_id: run.sessionId, source: 'startup' });
+  assert.equal((await orchText('about', 'ABC-77', 'Title from the list', 'soft=yes')).code, 0);
+  assert.equal((await getRun(run.id)).about, 'Title from the list');
+  // The first step has read the task and asks about the steps: no DONE yet, but the tab learns what it is.
+  await hook(run, 'Stop', say('Here is the task. Go with these steps?\nORCHESTRA:TASK ABC-77 | Real title\nORCHESTRA:ABOUT: Real title — fix the legend'));
+  let now = await getRun(run.id);
+  assert.equal(now.about, 'Real title — fix the legend', 'the run\'s own summary replaces the stand-in');
+  assert.ok(!now.aboutSoft);
+  assert.deepEqual([now.task.key, now.task.title], ['ABC-77', 'Real title']);
+  // One you set by hand is never replaced.
+  assert.equal((await orchText('about', 'ABC-77', 'Mine')).code, 0);
+  await hook(run, 'Stop', say('more\nORCHESTRA:ABOUT: Something else'));
+  assert.equal((await getRun(run.id)).about, 'Mine');
+  await close(run);
+});
+
 test('intake: a run started with nothing takes the key its first step picks (a work order); plain words in the tab move the run', async () => {
   // Start with nothing: one run, no task yet; its first step gets no words.
   const { body: d } = await orch('start', 'demo-hello-recap', 'draft=yes');
@@ -775,6 +852,67 @@ test('no template: pasted keys each open a run whose first step picks the task a
   const { material } = await import('../lib/learn.mjs');
   assert.match(material(now), /suggested the steps Say hello > Recap; you changed them to Say hello > Recap > Extra/);
   for (const x of runs) await close(await getRun(x.id));
+});
+
+test('guided run: the template is only a guide; steps are picked one at a time (no wait gate); the pane shows what is likely next', async () => {
+  fs.cpSync(path.join(ROOT, 'skills/intake'), path.join(homeSkills, 'intake'), { recursive: true });
+  const body = (await orch('start', 'ITP2-9301')).body;
+  const started = Array.isArray(body) ? body[0] : body;
+  const run = await waitFor(async () => { const r = await getRun(started.id); return r.session?.open ? r : null; }, 'its tab to open');
+  await hook(run, 'SessionStart', { session_id: run.sessionId, source: 'startup' });
+  const rulesOf = (spec) => spec.args[spec.args.indexOf('--append-system-prompt') + 1];
+  assert.match(rulesOf((await launch(await getRun(run.id), fakeLauncher())).body), /Never change the steps without asking/, 'no guide: the old rule');
+  const asRun = (...a) => proc([path.join(ROOT, 'bin/orch.mjs'), ...a], { extraEnv: { ORCHESTRA_RUN_ID: run.id, ORCHESTRA_HOOK_TOKEN: run.hookToken } });
+  const pane = async (...a) => (await proc([path.join(ROOT, 'bin/orch.mjs'), 'watch', run.id, '--once', ...a])).out.replace(/\x1b\[[\d;]*m/g, '');
+
+  // The guide: no steps go in; the run shows what is likely next.
+  let r = await asRun('use', 'this', 'demo-hello-recap', 'guide=yes');
+  assert.equal(r.code, 0, r.err);
+  let now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => s.skill), ['intake']);
+  assert.deepEqual([now.templateId, now.guide.steps.map((s) => s.id)], ['demo-hello-recap', ['hello', 'recap']]);
+  assert.match((await asRun('run', 'this')).out, /Guide: Demo: hello then recap[\s\S]*Likely next: hello \(\/orchestra-hello[^\n]*· recap/);
+  assert.match(await pane('--rows', '30', '--cols', '60'), /· Say hello\n· Recap/, 'no pin: grey lines');
+
+  // A picked guide step keeps its settings, with no wait gate; a set keeps mcp.
+  fs.writeFileSync(path.join(dataDir, 'templates', 'demo-hello-recap.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(ROOT, 'test/fixtures/demo-hello-recap.json'), 'utf8')), steps: [{ id: 'hello', skill: 'orchestra-hello', label: 'Say hello', wait: true, model: 'sonnet' }, { id: 'recap', skill: 'orchestra-recap', label: 'Recap' }] }));
+  assert.equal((await asRun('use', 'this', 'demo-hello-recap', 'guide=yes')).code, 0);
+  r = await asRun('steps', 'this', 'add', 'hello');
+  assert.equal(r.code, 0, r.err);
+  now = await getRun(run.id);
+  assert.deepEqual(now.steps.map((s) => [s.id, s.label, s.wait, s.model]), [['intake', 'Pick the task and the steps', false, 'opus'], ['hello', 'Say hello', false, 'sonnet']]);
+  assert.equal((await asRun('steps', 'this', 'set', 'hello', 'mcp=on')).code, 0);
+  assert.equal((await getRun(run.id)).steps[1].mcp, true, 'mcp stays on a step change');
+  assert.match((await asRun('run', 'this')).out, /Likely next: recap/);
+
+  // With a pin, the steps fold: the step now and one grey line; the pin gets the rest.
+  await orch('pin', run.id, Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n'));
+  const out = await pane('--rows', '20', '--cols', '60');
+  assert.match(out, /● 1 Pick the task[^\n]*\n· next: Say hello · Recap\n/, 'the step now, then the picked step and the guide\'s, grey');
+  assert.ok(!/○/.test(out), 'no step lines to come');
+  assert.ok(out.split('\n').filter((l) => /^line \d+/.test(l)).length >= 8, 'the pin has the room (12 steps would take no more)');
+
+  // This claude started before the guide: the step's instruction carries the whole pick rule.
+  // (hello wants sonnet: claude restarts with it, so the instruction is the restart's prompt.)
+  await hook(run, 'Stop', done('picked the first step'));
+  const told = (await getRun(run.id)).launchPrompt;
+  assert.match(told, /\/orchestra-hello/);
+  assert.match(told, /ask which step comes next with AskUserQuestion[\s\S]*Open items first/);
+  // A claude that starts now has it in its rules; the instruction only reminds.
+  const rules = rulesOf((await launch(await getRun(run.id), fakeLauncher())).body);
+  assert.match(rules, /picks its steps one at a time/);
+  assert.ok(!/Never change the steps without asking/.test(rules));
+  // Nothing more picked: DONE ends the run.
+  await hook(run, 'Stop', done('hello'));
+  now = await getRun(run.id);
+  assert.equal(now.status, 'done');
+  // Wrap up may save the picked steps over the guide (replace keeps its name), or as a new template.
+  assert.match((await orchText('template', 'from', run.id, 'demo-hello-recap')).err, /already exists \(replace=yes/);
+  assert.equal((await orchText('template', 'from', run.id, 'demo-hello-recap', 'replace=yes')).code, 0);
+  const saved = (await orch('template', 'show', 'demo-hello-recap')).body;
+  assert.deepEqual([saved.name, saved.steps.map((s) => [s.id, s.wait])], ['Demo: hello then recap', [['hello', false]]]);
+  fs.copyFileSync(path.join(ROOT, 'test/fixtures/demo-hello-recap.json'), path.join(dataDir, 'templates/demo-hello-recap.json'));
+  await close(now);
 });
 
 test('go from outside: a working run is refused; a waiting one starts at once; a step working now is skipped when you jump', async () => {
@@ -1561,10 +1699,12 @@ test('a closed tab stops the run; Reopen resumes the same session; a restart not
   assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 200);
   now = await waitFor(async () => ((await getRun(run.id)).session?.open ? getRun(run.id) : null), 'the reopened session');
   assert.equal(now.status, 'needs-you');
-  assert.match(now.note, /Reopened on the same conversation\. Type next to go on with the step, redo to start it again, skip to move past it/);
+  assert.match(now.note, /Reopened on the same conversation\. Answer the question on the left \(or type next, redo or skip\)/);
   const spec = (await launch(now, fakeLauncher())).body;
   assert.equal(spec.args[spec.args.indexOf('--resume') + 1], run.sessionId);
-  assert.ok(!spec.args.includes('/orchestra-recap'), 'no prompt: you type next or redo');
+  assert.ok(!spec.args.includes('/orchestra-recap'), 'the step is not started again by itself');
+  // Claude asks how to go on, with a click: go on, start it again, or hold.
+  assert.match(spec.args.at(-1), /reopened this tab[\s\S]*"Go on where it stopped" \(Recommended\) · "Start Recap again" · "Put the run on hold"[\s\S]*ORCHESTRA:DO redo[\s\S]*ORCHESTRA:DO hold/);
   // The resumed conversation reports its running total (0.05 before, 0.06 now): counted once.
   await hook(now, 'status', { cost: { total_cost_usd: 0.06 } });
   assert.equal((await getRun(run.id)).cost, 0.06);
@@ -1727,6 +1867,109 @@ test('heavy steps: every run opens at once; only the limit of heavy steps work a
   } finally {
     await api('PUT', '/api/settings', { maxRunning: 20 });
   }
+});
+
+test('words: questions say the cause first; the step note says what is not done; PR links of other runs are left out; the pick shows usual costs', async () => {
+  const { RUN_RULES } = await import('../lib/guard.mjs');
+  assert.match(RUN_RULES, /Before each question, say the cause in 2 or 3 plain lines[\s\S]*never guessed/);
+  assert.match(RUN_RULES, /Not done: \(what this step left open/);
+  const { keepShipInfo, prBranch } = await import('../lib/run/ship.mjs');
+  assert.equal(prBranch('https://bitbucket.org/o/api/pull-requests/new?source=feature%2FITP-1-a&t=1'), 'feature/ITP-1-a');
+  assert.equal(prBranch('https://github.com/o/r/compare/main...feat/x'), 'feat/x');
+  const run = { workspace: { repos: [{ token: 'api', branch: 'feature/ITP-1-a' }] } };
+  keepShipInfo(run, 'Mine: https://bitbucket.org/o/api/pull-requests/new?source=feature/ITP-1-a&t=1 and the other run: https://bitbucket.org/o/api/pull-requests/new?source=feature/ITP-2-b&t=1');
+  assert.deepEqual(run.ship.prUrls, ['https://bitbucket.org/o/api/pull-requests/new?source=feature/ITP-1-a&t=1']);
+  const none = {};
+  keepShipInfo(none, 'https://bitbucket.org/o/api/pull-requests/new?source=x&t=1');
+  assert.equal(none.ship.prUrls.length, 1, 'a run with no branch yet keeps the link');
+  const { runSteps } = await import('../lib/format.mjs');
+  const g = { steps: [], cost: 0, guide: { id: 'g', name: 'G', steps: [{ id: 'plan', skill: 'plan-x', label: 'Plan', model: 'opus', effort: 'high' }] } };
+  assert.match(runSteps(g, { usual: { 'plan-x': { done: 2, avgCost: 3, avgMs: 840000 } } }), /Likely next: plan \(\/plan-x, opus, effort high, usually \$3\.00 and 14 ?min of AI time\)/);
+  const { pickRule } = await import('../lib/run/prompts.mjs');
+  assert.match(pickRule(g), /"Put the run on hold"[\s\S]*ORCHESTRA:DO hold[\s\S]*usual cost and AI time/);
+});
+
+test('waiting fixes: a failed step asks with a click; redo with every slot taken waits its turn and starts by itself', async () => {
+  await api('PUT', '/api/settings', { maxRunning: 1 });
+  try {
+    for (const r of (await api('GET', '/api/runs')).body) if (r.status === 'running' && r.session?.open) await close(r);
+    const b = await startRun([{ id: 'build', skill: 'orchestra-hello', heavy: true }]);
+    // A failed step gets one more turn: Claude asks what to do (a click), never "type redo".
+    const failed = (await hook(b, 'Stop', say('The build broke.\nORCHESTRA:FAILED'))).body.output;
+    assert.equal(failed.decision, 'block');
+    assert.match(failed.reason, /failed[\s\S]*AskUserQuestion[\s\S]*"Run it again" \(Recommended[\s\S]*"Skip it"[\s\S]*ORCHESTRA:DO redo[\s\S]*ORCHESTRA:DO skip/);
+    assert.equal((await getRun(b.id)).status, 'failed');
+    // Another run takes the only heavy slot meanwhile.
+    const a = await startRun([{ id: 'build', skill: 'orchestra-hello', heavy: true }]);
+    assert.equal((await getRun(a.id)).steps[0].status, 'running');
+    // The user clicked "Run it again": redo goes in line (no "type redo again"), its first try kept.
+    const said = context(await hook(b, 'UserPromptSubmit', { prompt: 'redo' }));
+    assert.match(said, /Waiting for a free slot[\s\S]*starts by itself[\s\S]*do not start the step yourself/);
+    let now = await getRun(b.id);
+    assert.deepEqual([now.status, now.steps[0].status, now.slotNext.step, now.steps[0].tries.length], ['waiting', 'pending', 'build', 1]);
+    await hook(b, 'Stop', say('It waits for a free slot.'));
+    assert.equal((await getRun(b.id)).steps[0].status, 'pending', 'not started while the slot is taken');
+    // The slot frees up: b starts by itself, once.
+    await hook(a, 'Stop', done('built'));
+    now = await waitFor(async () => { const r = await getRun(b.id); return r.steps[0].status === 'running' ? r : null; }, 'b to start again');
+    assert.ok(now.restart && !now.slotNext);
+    assert.equal(now.steps[0].attempts, 2);
+    await close(await getRun(a.id));
+    await close(now);
+  } finally {
+    await api('PUT', '/api/settings', { maxRunning: 20 });
+  }
+});
+
+test('hold: parks the run (a working step goes back, slot free); a picked hold ends the step first; next goes on', async () => {
+  const run = await startRun();
+  const r = await hook(run, 'UserPromptSubmit', { prompt: '/orch hold back tomorrow' });
+  assert.match(r.body.output.reason, /put this run on hold \(back tomorrow\)[\s\S]*Type next to go on/);
+  let now = await getRun(run.id);
+  assert.deepEqual([now.status, now.hold.why, now.steps[0].status, now.steps[0].tries.length], ['waiting', 'back tomorrow', 'pending', 1]);
+  assert.match(now.note, /On hold: back tomorrow\. Type next in its tab to go on with "Say hello"/);
+  assert.match(context(await hook(now, 'UserPromptSubmit', { prompt: 'next' })), /\/orchestra-hello/);
+  now = await getRun(run.id);
+  assert.ok(!now.hold && now.steps[0].status === 'running', 'next goes on; the hold ends');
+  // The pick's "Put the run on hold": the step is done, then the run parks (the next step does not start).
+  const out = (await hook(now, 'Stop', { last_assistant_message: 'Hello.\nORCHESTRA:DO hold lunch\n\nWHAT I DID AND WHY:\n- said hello\nNot done: nothing\nORCHESTRA:DONE' })).body.output;
+  assert.match(out.systemMessage, /on hold \(lunch\)/);
+  now = await getRun(run.id);
+  assert.deepEqual([now.steps[0].status, now.steps[1].status, now.status, now.hold.why], ['done', 'pending', 'waiting', 'lunch']);
+  // Reopened later: Claude asks to go on (a click), not a blank wait.
+  await close(now);
+  assert.equal((await api('POST', `/api/runs/${run.id}/resume`)).status, 200);
+  now = await waitFor(async () => ((await getRun(run.id)).session?.open ? getRun(run.id) : null), 'the reopened session');
+  const spec = (await launch(now, fakeLauncher())).body;
+  assert.match(spec.args.at(-1), /"Go on with Recap" \(Recommended\) · "Keep it on hold"[\s\S]*ORCHESTRA:DO next/);
+  await close(await getRun(run.id));
+});
+
+test('honest costs: a claude that counts from 0 again loses nothing; steps add up to the run; go back starts a step at $0; wait for you counts apart', async () => {
+  const run = await startRun();
+  await hook(run, 'status', { cost: { total_cost_usd: 1 } });
+  await hook(run, 'Stop', done('hello'));
+  // A resumed claude counts from 0 again: the run's cost never goes down.
+  await hook(run, 'status', { cost: { total_cost_usd: 0.3 } });
+  let now = await getRun(run.id);
+  assert.equal(now.cost, 1.3);
+  assert.ok((await logs(run)).some((t) => /counted from 0 again: \$1\.00 kept/.test(t)));
+  // The step waits for the user: that time counts apart from the AI's time.
+  await hook(run, 'Stop', say('Which one?'));
+  await sleep(60);
+  await hook(run, 'UserPromptSubmit', { prompt: 'the first' });
+  await hook(run, 'Stop', done('recap'));
+  now = await getRun(run.id);
+  assert.deepEqual([now.steps[0].cost, now.steps[1].cost], [1, 0.3]);
+  assert.equal(Math.round((now.steps[0].cost + now.steps[1].cost) * 100) / 100, now.sessionCost, 'the steps add up to the run');
+  assert.ok(now.steps[1].youMs >= 50 && now.steps[1].youMs <= now.steps[1].durationMs);
+  const stats = (await orch('stats')).body.skills.find((s) => s.skill === 'orchestra-recap');
+  assert.ok(stats.avgYouMs > 0, 'stats show the wait for you apart'); // an average over every test run of the skill
+  // Go back: the step starts again at $0; its first try keeps the cost (a skip later shows $0, not the old cost).
+  await runnerCall('go', [run.id, 'hello again']);
+  now = await getRun(run.id);
+  assert.deepEqual([now.steps[0].cost, now.steps[0].tries[0].cost, now.steps[1].cost, now.steps[1].tries[0].cost], [0, 1, 0, 0.3]);
+  assert.match((await orchText('run', run.id.slice(-6))).out, /try 1: done · \$1\.00/);
 });
 
 test('several Jira tickets at once: one run each, in order; each tab is named after its ticket', async () => {
@@ -1974,6 +2217,29 @@ test('parts: the Windows Terminal command line (a ; in the job, the pane size) a
   assert.equal(cmd[cmd.indexOf('--size') + 1], '0.7', 'the pane is 70% at most');
   assert.equal(tabCommand(run, 'C:/o/1', { pane: true, paneSize: 'x' })[cmd.indexOf('--size') + 1], '0.3');
   assert.ok(!tabCommand(run, 'C:/o/1').includes(';'), 'no pane: one command');
+  assert.ok(!cmd.includes('--suppressApplicationTitle'), 'the tab name is Orchestra\'s to set (the mark)');
+  // The tab's mark: needs you, in line (Orchestra's doing), done, or none while it works.
+  const { tabMark, markedTitle } = await import('../lib/terminal.mjs');
+  const r = (o) => ({ ...run, status: 'running', ...o });
+  assert.equal(tabMark(r()), '', 'working: no mark');
+  for (const status of ['needs-you', 'waiting', 'failed']) assert.equal(tabMark(r({ status })), '🔴', status);
+  assert.equal(tabMark(r({ status: 'waiting', appNext: { step: 'x' } })), '⏳', 'its next step waits for the app');
+  assert.equal(tabMark(r({ status: 'waiting', slotNext: { step: 'x' } })), '⏳', 'waits for a slot');
+  assert.equal(tabMark(r({ status: 'needs-you', appWant: { step: 'x' } })), '⏳', 'the step waits in line for the app');
+  assert.equal(tabMark(r({ status: 'needs-you', appWant: { step: 'x' }, appHeld: true })), '🔴', 'it has the app and asks you');
+  assert.equal(markedTitle(r({ status: 'done' })), '✅ Fix the legend then ship it');
+  // MCP servers per step: the heavy ones only in the skills that use them, all with mcp=on.
+  const { mcpFor } = await import('../lib/run/prompts.mjs');
+  assert.deepEqual(mcpFor({ skill: 'execute-epics' }), ['jira', 'bitbucket']);
+  assert.deepEqual(mcpFor({ skill: 'app-test' }), ['jira', 'bitbucket', 'mongodb', 'mongodb-app', 'mongodb-global']);
+  assert.deepEqual(mcpFor({ skill: 'bug-logs' }), ['opensearch', 'jira', 'bitbucket']);
+  assert.equal(mcpFor({ skill: 'x', mcp: true }).length, 6, 'mcp=on: every server');
+  // A step that needs a server the running claude did not start restarts it; one that needs fewer does not.
+  const live = { session: { open: true }, model: 'opus', effort: 'high', mcpOn: ['jira', 'bitbucket'] };
+  assert.equal((await runnerCall('wantsRestart', [live, { skill: 'app-test' }])).body, true, 'Test in the app gets Mongo');
+  assert.equal((await runnerCall('wantsRestart', [live, { skill: 'execute-epics' }])).body, false);
+  assert.equal((await runnerCall('wantsRestart', [{ ...live, mcpOn: mcpFor({ skill: 'app-test' }) }, { skill: 'review-changes' }])).body, false, 'fewer: no restart');
+  assert.equal((await runnerCall('wantsRestart', [{ ...live, mcpOn: undefined }, { skill: 'app-test' }])).body, false, 'an older run started them all');
   // A hook that cannot get the lock never passes a tab word to Claude as talk.
   const { failedOutput } = await import('../lib/hook-handler.mjs');
   assert.match(failedOutput('UserPromptSubmit', { prompt: '/orch next' }, new Error('busy')).output.reason, /could not handle "\/orch next": busy/);
@@ -2029,15 +2295,15 @@ test('no pack: a one-repo project on master, a path with a space, a GitHub PR li
     assert.deepEqual([settings.enabledMcpjsonServers, settings.disabledMcpjsonServers], [[], []]);
     assert.equal(spec.env.ORCHESTRA_PROTECT_DEFAULT, '1');
     assert.equal(spec.env.ITP_REGISTRY_OFF, undefined);
-    // master is guarded: by the guard and by the git hooks.
-    assert.equal(check('Bash', { command: 'git push origin master' }, spec.env)?.needsApproval, false);
+    // A push to master asks you, like any push: the guard and the git hooks.
+    assert.equal(check('Bash', { command: 'git push origin master' }, { ...spec.env, ORCHESTRA_ALLOW_PUSH: '0' })?.needsApproval, true);
     g(['switch', '-q', '-c', 'orch/greeting'], wt);
     fs.writeFileSync(path.join(wt, 'hello.txt'), 'hi\n');
     g(['add', '.'], wt);
     g(['commit', '-qm', 'greeting'], wt);
-    const push = spawnSync('git', ['push', 'origin', 'HEAD:master'], { cwd: wt, encoding: 'utf8', env: { ...process.env, ...spec.env } });
+    const push = spawnSync('git', ['push', 'origin', 'HEAD:master'], { cwd: wt, encoding: 'utf8', env: { ...process.env, ...spec.env, ORCHESTRA_ALLOW_PUSH: '0' } });
     assert.notEqual(push.status, 0);
-    assert.match(push.stderr, /a push to the main branch is refused/);
+    assert.match(push.stderr, /needs the user's Approve/);
     // A GitHub PR link is kept; the Wrap up step gets it, and no vault lines.
     const out = await hook(run, 'Stop', done('built. Open the PR: https://github.com/me/solo/pull/new/orch/greeting'));
     assert.deepEqual((await getRun(run.id)).ship.prUrls, ['https://github.com/me/solo/pull/new/orch/greeting']);
@@ -2123,7 +2389,7 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     assert.match(wrapAsk, /Pull requests: https:\/\/bitbucket\.org\/orbitax\/itp-api/);
     assert.ok(fs.existsSync(flag), 'the flag is there while Wrap up works');
     assert.equal(check('Bash', { command: 'cd ITPKV && git push origin main' }, genv)?.needsApproval, true, 'the vault push asks you');
-    assert.equal(check('Bash', { command: 'git -C ITP-API push origin main' }, genv)?.needsApproval, false, 'a code repo never pushes main');
+    assert.equal(check('Bash', { command: 'git -C ITP-API push origin main' }, genv)?.needsApproval, true, 'a code repo push to main asks you');
     const spec = (await launch(await getRun(run2.id), fakeLauncher())).body;
     assert.equal(spec.env.ORCHESTRA_WRAPUP_DIRS, path.join(tmp, 'itp').replace(/\\/g, '/'));
     assert.equal(spec.env.ORCHESTRA_WRAPUP_ONLY, '^Execution/');
@@ -2682,6 +2948,7 @@ try {
 } finally {
   for (const p of sleepers) p.kill();
   await new Promise((r) => setTimeout(r, 1500)); // background jobs (tick, lessons) end
+  stopTestApps(path.basename(tmp));
   fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10 });
 }
 console.log(failed ? `\n${failed} failed` : `\nall ${chosen.length} passed`);

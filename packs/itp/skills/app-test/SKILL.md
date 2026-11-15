@@ -1,6 +1,6 @@
 ---
 name: app-test
-description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), hands the app to the user with an exact click path, and fixes what the user reports (2 rounds at most). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
+description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), hands the app to the user with an exact click path, and fixes what the user reports (after 2 rounds it asks before another). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
 ---
 
 # Test in the app
@@ -34,6 +34,10 @@ needs, an exact click path, the logs read when something fails, and fixes.
 ## 2. Ask the user (AskUserQuestion, in one go)
 
 - Show the test plan so the user can correct it. Never guess a login (there is none on localhost) or a company.
+- **The services and the DB in one question**, a click, not a talk: one option names the whole start, for example
+  **"Global DB · no Outsider · no Mission · Scheduler on (Recommended)"**, and one or two others differ only where this
+  ticket may need it (Local DB; Mission on for a XatBot ticket). Each option lists every service it starts or leaves out,
+  so the user sees what they get. The details for the options:
 - **Which services to start.** `app start` alone starts the usual set, and prints it. With the AppHost launcher
   (the default, `orch settings` shows it) that is the **web app, Platform API, Primary, Secondary, the Spreadsheet Job,
   the Scheduler, the MCP consumer, the dev IdP**, and the **Mission consumer** when the branch has it (unless
@@ -74,7 +78,9 @@ restart of the .NET services (the web app does not read it).
 ## 3. Get the app
 
 1. `app build`: builds this run's code while you wait (no turn needed). Fix build errors before you go on.
-2. `app take --minutes 9`: waits in line. It prints your place ("2nd in line, ITP2-… has it").
+2. `app take --minutes 9`: waits in line. It prints your place ("2nd in line, ITP2-… has it"). When this step uses the
+   app (`app=on`, the usual), Orchestra started it only once the app was free and the app is already this run's:
+   `app take` answers at once. Never loop on it.
 3. If the user wants the other database than the active one, switch it **before** you start (see "Switching the
    database"), so the app starts once on the right one.
 4. Start the app with the services from step 2: `app start --minutes 9`, plus `--with outsider` only if the user said
@@ -136,8 +142,9 @@ The app is at http://localhost:9000 (api http://localhost:50544).
   instead: use those. Say whether it is an api error or a screen problem.
 - Find the cause and fix the code (in this run's worktrees only), then restart what changed (`app start` again with the
   same services, or just the web app for a WebClient-only change) and ask the user to retry the failed checks, then the
-  rest quickly. **At most 2 fix rounds.** Still failing: stop, say what fails and what you tried, and end with
-  `ORCHESTRA:FAILED`.
+  rest quickly. **After 2 fix rounds**, ask with a click: **Another round** (say what you would try
+  next) · **Stop and report** (say what fails and what you tried, then end with `ORCHESTRA:FAILED`). Ask again after each
+  further round.
 
 - **The user needs the other DB for the next check** (for example CbC on Local, then GIR on Global): follow "Switching
   the database" (ask, back up, edit the two blocks, restart the .NET services, up-check, tell the user to reload).

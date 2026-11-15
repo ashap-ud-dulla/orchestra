@@ -53,11 +53,19 @@ export default {
   // read-only log search.
   runMcp: ['opensearch', 'jira', 'bitbucket', 'mongodb', 'mongodb-app', 'mongodb-global'],
   runMcpOff: ['FM-MCP', 'aspire', 'aspire-dashboard', 'mongodb-cluster'],
+  // Each run started all of them: ~9 node processes and ~430 MB per run, while only Test in the app used Mongo
+  // (2026-11-09: 2 calls in 6 runs) and only bug runs read the logs. Jira and Bitbucket are light: always on.
+  mcpOnlyIn: {
+    mongodb: ['app-test'],
+    'mongodb-app': ['app-test'],
+    'mongodb-global': ['app-test'],
+    opensearch: ['bug-logs'],
+  },
 
-  mainRule: 'Never commit on, push to, or switch to the main branch. One exception: the vault (ITPKV) is committed locally on main, as the team skills do. Never push the vault, and never commit or push in the ITP folder itself, except in the Wrap up step (/wrap-up), for the jobs the user picks there.',
+  mainRule: 'Work on a work branch. Commit on, push to, or switch to the main branch of a code repo only when the user asked for it: say so in one line first; the push and the switch show the user an Allow prompt. The vault (ITPKV) is committed locally on main, as the team skills do. Never push the vault, and never commit or push in the ITP folder itself, except in the Wrap up step (/wrap-up), for the jobs the user picks there.',
 
   // The vault (ITPKV) is its own repo, and the team commits it locally on main by design. The git hooks allow work on
-  // main there only. Pushing to main stays refused everywhere.
+  // main there; it pushes only in the Wrap up step.
   mainOkDirs(root, wsDir) {
     return [root && path.join(root, 'ITPKV'), wsDir && path.join(wsDir, 'ITPKV')].filter(Boolean).map((d) => d.replace(/\\/g, '/'));
   },
@@ -67,7 +75,11 @@ export default {
   tracking,
   trackingOffText: 'Tracking is OFF: no Teamspace calls, no vault (ITPKV) writes.',
 
-  rules: ['When the task in .orchestra/task.md is a Work Order and you run /plan-itp, add --wo with its key.'],
+  rules: [
+    'When the task in .orchestra/task.md is a Work Order and you run /plan-itp, add --wo with its key.',
+    // The open items of a review, for the next-step pick (the review skill itself never edits code).
+    'After /ai-itp-code-reviewer, its open items are the findings (High, Medium and Low) in the newest .code-reviews/<stamp>-<slug>/report.md: list each one not fixed and not waived (file:line and the problem, one short line). "Handle them now" fixes them in this step, after the user\'s ok; a waived one needs the user\'s reason. After the fixes, re-check only the fixed spots (do not run the full review again unless the user asks), and say "N fixed, M waived, K left".',
+  ],
 
   // The Wrap up step may commit and push the ITP folder itself (on main), its Execution/ files only.
   wrapUpPushDirs: (root) => (root ? [String(root).replace(/\\/g, '/')] : []),

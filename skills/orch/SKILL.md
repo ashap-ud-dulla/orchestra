@@ -56,7 +56,11 @@ Below, `orch <command>` means that full line. `orch help` lists every command. O
 
 1. Run `orch status` and show it, then say in one or two lines what needs the user (a question, a `next`, an Allow).
    If it has a "Left alone 7+ days" or "Finished, folder still there" line, offer **Clean up** once (see **Clean up**).
-2. Ask **Work on something new?** with **Yes** · **No**. Yes: **Pick work** below.
+2. Run `orch skills new --json`. When it lists any, say it in one line ("3 new team skills since you last looked:
+   build-v2, test-stacks, …"); runs weigh them for their task by themselves. If the user wants to look: show
+   them (`orch skills new`), say for each which of their templates it could fit, and mark them seen when the user says
+   so (`orch skills seen`, or `orch skills seen <names>`). Do not ask about them every time: one line.
+3. Ask **Work on something new?** with **Yes** · **No**. Yes: **Pick work** below.
 
 ## Pick work
 
@@ -76,6 +80,8 @@ The user picks here, in this tab; each pick then opens its own run, which plans 
    ("1, 3, 4", "all without a run"), or a job in words.**
 4. Start them all at once: **Start run(s)** below, with the keys picked (a picked one with a run: ask first, then
    `again=yes`). Nothing held and nothing typed: ask what to work on.
+5. Right after the start, give each picked run its title from the table, so its tab says what it is at once (the run
+   replaces it with its own summary once it reads the task): one `orch about <key> "<title>" soft=yes` per run.
 
 ## Words after /orch: plain words
 
@@ -107,8 +113,11 @@ When unsure what they mean, ask one short question with options.
    (`ABC-123`), or a link to it. A job in words is quoted: `"Add a Sweden row"`. A text that only mentions a ticket
    ("same fix as ABC-1, but for Sweden") is a job, not that ticket.
 2. **No template needed**: `orch start <keys…>`. Each run's first step, **Pick the task and the steps**, reads its
-   task, suggests the steps that fit (one of the user's templates, changed for it, with a cost and time estimate) and
-   asks, in the run's tab. Only when the user names a template: `orch start <template> <keys…>`.
+   task, takes one of the user's templates as a **guide** (with a cost and time estimate) and asks for the first step,
+   in the run's tab. Then the steps are **picked one at a time**: when a step is done, its Claude asks which step comes
+   next (open items like review findings first, the guide's usual next step, others that fit, Done) and the user
+   clicks; the pane shows the picked steps and, grey, what is likely next. At Wrap up it offers to save the picked steps
+   as a template. Only when the user names a template: `orch start <template> <keys…>` (all its steps at once).
 3. A ticket that has a run already is refused: ask, then add `again=yes`.
 4. Show the result in one or two lines: every run opens its tab now in the "orchestra" window; heavy steps (builds,
    the app) work a few at a time (`orch settings` shows how many) and the others wait and start by themselves.
@@ -162,6 +171,11 @@ Ask: **New template** · **Change a template** · **Find skills** · **List temp
   `template set <id> name="…" tracking=on|off repos=a,b`, `template copy <id> <new-id>`, `template delete <id>` (ask first).
 - Step options in plain words: **wait** = stop after this step until the user types `next`; **app** = this step starts
   the app (one run at a time); **explain** = after this step, walk the user through the code changes.
+- **Tool servers (MCP) per step**: the solution's pack starts its heavy servers only in the steps
+  that use them, so runs stay light. A step that needs them all anyway: `steps <id> set <step> mcp=on`.
+- **Tab marks**: a run tab's name starts with 🔴 when it needs the user (a question, an Allow, `next`, a failure),
+  ⏳ while it waits in line (the app, a slot), ✅ when done; no mark while it works. Tabs opened before this
+  change show it after `orch reopen`.
 - **New conversation per step** (`fresh=on`): the step starts a new conversation instead of carrying the whole
   history (the biggest cost: every request re-reads it). It gets a short story of the earlier steps; plans
   and code are on disk. Good for steps that read from disk (Build, code review, Wrap up); not for a step that needs
@@ -200,8 +214,8 @@ Ask: **Lessons** · **Stats** · **Settings**.
 ## After a PC restart
 
 Run tabs close with the PC. `orch status` shows "N stopped (reopen all)". Offer `orch reopen all`: each tab opens again
-on its own conversation. In each tab the user types `next`: a step that was cut off halfway (like a build) goes on
-from where it stopped; after a finished step, the next one starts. `redo` runs the step again from the start, and
-`skip` marks it done and moves past it (on purpose only).
+on its own conversation, and its Claude asks with a click: **Go on where it stopped** · **Start the step again** · **Put
+the run on hold** (after a finished step: **Start <next step>**). Typing still works: `next`, `redo`, `skip`.
+`/orch hold [why]` in a run tab parks the run (frees its heavy slot and the app); `next` or a reopen goes on.
 
 <!-- The solution's pack adds its own part below (orch setup). -->

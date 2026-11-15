@@ -53,20 +53,42 @@ Orchestra only touches ITP in four ways (all through `packs/itp`):
   (status; `PASSED` = done or skipped in `lib/run/steps.mjs`) and tells the step (`jumpedOver`, `why`).
 - One `/orch` + plain words. `orch start <keys…>` with no template makes runs whose only step is `intake` ("Pick the
   task and the steps"; the ITP pack's reads Teamspace Work Orders, read only): it reads the task into
-  `.orchestra/task.md`, suggests a template changed for the task (heavy steps, cost/time from `orch stats`, overlap
-  with other runs), asks, and puts the steps in itself with `orch use this <template>` / `orch steps this …` (`this` =
-  the tab's run, checked by its token; these and read-only commands are pre-allowed in run sessions, `RUN_ORCH`). It
-  ends with `ORCHESTRA:TASK <KEY> | title` (`run.task`; `ticketKey` prefers it) and `ORCHESTRA:PLAN suggested | chosen`
+  `.orchestra/task.md`, takes a template as the run's **guide** (`orch use this <template> guide=yes`: `run.guide`, no
+  steps go in; cost/time from `orch stats`, overlap with other runs) and asks for the first step (`this` = the tab's
+  run, checked by its token; these and read-only commands are pre-allowed in run sessions, `RUN_ORCH`). It ends with
+  `ORCHESTRA:TASK <KEY> | title` (`run.task`; `ticketKey` prefers it) and `ORCHESTRA:PLAN suggested | chosen`
   (`run.plan`, lesson material). `/orch` itself never calls Teamspace.
+- **Steps picked one at a time** (a run with `run.guide`): when a step's work is done, its Claude asks the next step with
+  AskUserQuestion *before* DONE (`pickRule` in `lib/run/prompts.mjs`: open items first, then the guide's usual next,
+  others, Done), adds the click with `orch steps this add <guide step|skill>` (a guide step keeps its settings, no wait
+  gate: the pick is the gate), then DONE moves into it; nothing added, DONE ends the run. A claude started before the
+  guide gets the rule in the step instruction (`pickText`). The pane shows the guide's `likelyNext` grey and, while a
+  pin shows, always folds the steps so the pin keeps the room. Wrap up offers to save the picked steps as a template
+  (`template from this <id> [replace=yes]`). Runs with a full step list (a named template) work as before.
+- Main branch: every push asks (the guard's Allow prompt), a push to `main` and switching to it too; a run
+  works on main only when the user asked (`mainRule`). The one refusal: the pack's main folders (`mainOkDirs`,
+  `wrapUpPushDirs`) push only in Wrap up, and its own folder takes commits only there (`lib/git-hooks`).
 - Heavy steps: every run opens its tab at once; only heavy steps (`step.heavy`, or the skill marked heavy in
   `data/heavy-marks.json`, `isHeavy`) wait for one of `maxRunning` slots (`slotNext`, `startSlotWaiters`, like the app
   queue).
 - Plain words in a run tab: the run's Claude ends its reply with `ORCHESTRA:DO <command>` (what follows `/orch`);
   the Stop hook runs it as if typed (`doAsked`).
+- Clicks, not typing: a failed step gets one more turn to ask Run again · Skip · Go to another step (`failAsk`); a
+  reopened tab asks Go on · Start again · Hold (`reopenPrompt` as the launch prompt); `redo` while the app or every
+  slot is taken goes in line and starts by itself (as `go`). `/orch hold [why]` parks a run: a working step goes back
+  to pending (its try kept), the app and the slot are freed (`pack.app.stopFor` when it had the app), `run.hold`;
+  next or a reopen goes on. The pick's "Put the run on hold" is `ORCHESTRA:DO hold` before DONE (the step ends, then the run parks).
+- Honest costs: a resumed claude whose total goes down (it counts from 0 again) moves what it said to `costPast`
+  (`sessionRaw`), so the run's cost never drops and steps add up to it (the rest: "Between steps"). Go back starts a
+  step at $0 (the old cost stays in `tries`). `step.youMs` is the time a step waited for you (`youSince`,
+  `youBack`); stats show AI time without it. A guided run's Likely next shows each step's usual cost and AI time.
 - App queue: a step that needs the app while another run has it never blocks a hook: the run waits (`appNext`), its
   tab stays free, its slot is freed, and once the app is free its idle claude is restarted on the same conversation
   with the step (`startAppWaiters`, via `restart.ok`). Notifications only for an Allow prompt, a question, a next
   gate, a failure. Slow work (worktrees, waiting for the app, lessons) runs with the lock let go (`Runner.outside`).
+- New skills: `orch skills new` lists the solution's skills (not ~/.claude/skills) since you last looked
+  (`data/skills-seen.json`; the first look counts skills under 30 days old as new); `orch skills seen [names]` marks
+  them. `intake` weighs the new ones for its task (descriptions first) and `/orch` says them in one line.
 - Tabs open one at a time (`bin/open-tab.mjs`, the `runs/.tab-lock` folder): a tab is "new-tab ; split-pane", and wt
   splits the tab in focus, so two at once put one run's steps pane in another run's tab.
 - Processes a run leaves: helpers claude starts can lose their parent and need not name the run folder. The launcher

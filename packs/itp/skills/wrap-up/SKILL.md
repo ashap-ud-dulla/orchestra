@@ -40,8 +40,9 @@ Run these (Bash, read only) and show one short table, "Waiting" / "Nothing to do
 | ITP folder | `git -C <ITP> status --porcelain -- "Execution/<epic-folder>.json" "Execution/<epic-folder>/"` and `git -C <ITP> log --oneline @{u}.. -- Execution/` |
 | Epic | the epic folder, and the PR link(s) if any. Closing it is only right after its PR merged on Bitbucket |
 | Run repos | `git status --porcelain` in each run worktree (uncommitted work) |
+| Merged? | per run repo with a branch: `git fetch origin <base>`, then `git merge-base --is-ancestor HEAD origin/<base>` (exit 0: **merged**). Else `git cherry origin/<base> HEAD`: every line starts with `-`: **merged** (rebased). Else **not yet** when a PR link is there, **no PR opened** when none. A squash merge looks like "not yet": when the PR may be merged, ask the user (Merged · Not yet) instead of guessing |
 
-Only this run's epic counts in the ITP folder. Other Execution files there belong to other runs: list them in one
+A PR link whose branch is not one of this run's branches belongs to another run: leave it out. Only this run's epic counts in the ITP folder. Other Execution files there belong to other runs: list them in one
 line ("also waiting, not this run's: …"), never touch them.
 
 ## 2. Ask what to do
@@ -50,7 +51,7 @@ Ask with **AskUserQuestion**, `multiSelect: true`, "What should I do?". Offer on
 waiting:
 - **Push the vault**: commits not pushed (and, if there are uncommitted vault changes, say so in the description:
   you would commit them first, only the files you list).
-- **Close the epic**: description "Only after its PR is merged". Never offer it when tracking is off.
+- **Close the epic**: description "Only after its PR is merged" (say what the Merged? row found). Never offer it when tracking is off.
 - **Commit + push the ITP files**: this epic's `Execution/` files.
 
 If nothing is waiting, skip this question. Ticking nothing is fine: do no job.
@@ -79,6 +80,14 @@ If a run worktree has uncommitted files: show them and ask **Keep them (no clean
 - Throw them away: `git restore --staged --worktree .` and `git clean -fd` in that worktree only.
 - Keep them: the folder must stay, so in step 5 only **Keep the folder** and **Not yet** make sense.
 
+## 4b. Save the steps as a template?
+
+Only for a run that picked its steps one at a time (`orch run this` shows a **Guide:** line), and only when the steps it
+picked differ from the guide's. Show the run's steps next to the guide's, with what was added, dropped or moved, then ask
+once with AskUserQuestion: **Save as a new template** · **Update <guide>** · **No**. New: `orch template from this
+<short-id> name="<name>"`. Update: `orch template from this <guide id> replace=yes` (it replaces that template; say so in the
+option). Next runs that fit use it as their guide.
+
 ## 5. Ask about the clean-up
 
 Ask "Clean up this run when you close the tab?":
@@ -99,5 +108,6 @@ Show a short table of what you did (job, result). Then:
 ## Rules
 
 - Never push or commit anything the user did not pick. Never touch other runs' Execution files.
-- Pushing the vault and the ITP folder to `main` works only in this step; code repos never push to `main`.
+- Pushing the vault and the ITP folder to `main` works only in this step. A code repo pushes to `main` only when the
+  user asked for it (it shows an Allow prompt).
 - Never delete branches yourself: Orchestra deletes the ones git sees as merged when it cleans up.

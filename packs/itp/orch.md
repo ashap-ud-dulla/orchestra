@@ -14,7 +14,9 @@
 - In **Pick work**, `orch mine` lists the **Work Orders** the user holds or pairs on (Teamspace, read only, through
   ITP's own `registry_call GET`). Their Jira tickets come from the Atlassian tools (cloudId `orbitax.atlassian.net`).
 - Each run's first step, **Pick the task and the steps** (`intake`), then reads its Work Order (spec, comments,
-  acceptance tests, issues) or Jira ticket in its own tab, and suggests the steps.
+  acceptance tests, issues) or Jira ticket in its own tab, takes `feature-template` or `bug-template` as the guide,
+  and asks for the first step; each step then asks for the next (after `ai-itp-code-reviewer`, fixing its findings
+  comes first).
 
 ## ITP templates and steps
 
@@ -22,11 +24,11 @@
   missing, searches the ITP logs (OpenSearch, read only, names and ids hidden) and traces the error into
   `.orchestra-bug/trace.md`; the user checks "Is this the bug?". Then the feature flow plans and builds the fix.
   Start: `orch start bug-template <ticket>`.
-- **Testing in the app**: add the step `app-test` after the build, with wait on:
-  `orch steps <id> add app-test wait=on label="Test in the app"` (only when the user asks for it).
-  Do not mark it `app`: the step takes the app itself, only when it is ready to start it, and runs wait in line
-  (first come, first served). It asks the user for the test data, tests the ticket, fixes up to 2 rounds, and keeps
-  the app until the user types `next`. Suggest turning `app` off on build steps (`execute-epics` never starts the app),
+- **Testing in the app**: add the step `app-test` after the build, with the app on:
+  `orch steps <id> add app-test app=on label="Test in the app"` (only when the user asks for it).
+  `app=on` makes the run wait in the app line (first come, first served) with its tab free, and start the step by
+  itself when the app is free; it is a light step, so it never waits for a heavy slot. It asks the user for the test
+  data, tests the ticket, fixes (after 2 rounds it asks before another), and stops the app when it ends. Suggest turning `app` off on build steps (`execute-epics` never starts the app),
   so builds stop waiting for each other; change it only if the user says yes.
 - `orch app`: who has the app, who waits, whose code it serves. `orch app release <ticket>` takes it from a run
   that is stuck. `orch status` shows an `App:` line when someone has it or waits for it.
