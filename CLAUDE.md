@@ -31,6 +31,9 @@ Orchestra only touches ITP in four ways (all through `packs/itp`):
   `orch setup [solution=<folder>|none]`: the folder is optional. Tests run with `ORCHESTRA_PACK=itp`.
 - **Skills live in the repo** (`skills/`, with `{{ORCHESTRA}}` / `{{SOLUTION}}` placeholders). `orch setup` installs them
   into `~/.claude/skills` with the paths filled in: edit `skills/`, then run `orch setup`, never the installed copies.
+  Agents the same way: `agents/*.md` and `packs/<name>/agents/*.md` go into `~/.claude/agents` (`config.homeAgentsDir`;
+  one list of what setup wrote, `.orchestra-installed.json`, so a hand edit is kept as `.bak-<date>` and only
+  Orchestra's own agents are ever removed). A test that sets `ORCHESTRA_HOME_SKILLS` gets the agents beside it.
 - `/orch` (installed from `skills/orch`) is the front door: a menu plus shortcuts. It only calls
   `node bin/orch.mjs <command>` (`orch help` lists them; every command, its options and its help line live in one list, `lib/cli/spec.mjs`;
   options are `key=value`, old `--flags` still work; in a run tab `/orch <word>` is always handled by the hook). Each run is an interactive `claude` in its own Windows

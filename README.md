@@ -92,6 +92,7 @@ In a run's tab, just talk to it. `next`, `skip` and `redo` move it; `/orch model
 | What | Where | Undo |
 |---|---|---|
 | Orchestra's skills (`orch`, `intake`, `wrap-up`, and the core starters or your pack's) | `~/.claude/skills` | `node bin/orch.mjs setup uninstall=yes` |
+| Orchestra's agents (`agents/`, and your pack's) | `~/.claude/agents` (what it installed is listed in `.orchestra-installed.json` there) | `node bin/orch.mjs setup uninstall=yes` |
 | Your settings, templates, rules, lessons | `data/` in this folder (not in git) | delete the folder |
 | Run records | `runs/` in this folder (not in git) | `orch delete <run>` |
 | Run workspaces (git worktrees) | `C:/o` (or `worktrees=<folder>`) | `orch clean done` |

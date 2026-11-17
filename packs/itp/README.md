@@ -15,7 +15,8 @@ What it adds to the core:
 | The vault | `ITPKV` may be committed locally on main (as the team skills do); it is never pushed, except in the Wrap up step after your Allow |
 | Tracking | Templates can turn tracking off: Teamspace calls and vault writes are then refused, and skills that do them are refused at save and start (`orch skill-mark` corrects a wrong guess) |
 | MCP servers | Runs start opensearch, jira, bitbucket and the mongodb servers, and never FM-MCP, aspire or mongodb-cluster |
-| Skills | `app-test` (test in the app, one run at a time), `bug-logs` (find a client bug in the logs), `wrap-up` (push the vault, close the epic, commit the run's `Execution/` files, clean up) |
+| Skills | `app-test` (test in the app, one run at a time), `bug-logs` (find a client bug in the logs), `wrap-up` (push the vault, close the epic, commit the run's `Execution/` files, clean up), `itp-research` (research one part of ITP you name: performance, concurrency, memory, security & tenancy, business problems, dev pain points; read only, one report in `~/itp-research/`) |
+| Agents | `agents/`, installed into `~/.claude/agents`: `itp-research-runtime`, `itp-research-security`, `itp-research-business` (the three read-only lenses `/itp-research` runs in parallel) |
 | Templates | `feature-template`, `bug-template` |
 | The app | `app/` (the launcher, the log copier, its processes). `orch app start` runs the ITP app from your checkout (AppHost or run-stack, Debug.json Global/Local DB, Mission, Outsider); runs take it in line in their "Test in the app" step |
 | Work orders | `orch mine` lists the Work Orders you hold or pair on (Teamspace, read only, through ITP's own `registry_call GET`); `/orch` → "Work on something new?" shows them with your Jira tickets, numbered. Each run's first step (`intake`) reads its Work Order in its tab |

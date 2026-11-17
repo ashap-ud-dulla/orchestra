@@ -1629,6 +1629,57 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   assert.match((await fresh('setup')).out, /orch: updated\n/);
 });
 
+test('setup: installs the pack agents beside the skills, keeps hand edits, removes old ones, never touches yours', async () => {
+  const home = path.join(tmp, 'agents-home');
+  const agents = `${home}-agents`;
+  const data = path.join(tmp, 'agents-data');
+  const env = { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_SOLUTION_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: 'itp' };
+  const run = (...args) => proc([path.join(ROOT, 'bin/orch.mjs'), ...args], { extraEnv: env });
+  // An agent of yours, there before Orchestra.
+  fs.mkdirSync(agents, { recursive: true });
+  fs.writeFileSync(path.join(agents, 'mine.md'), 'my own agent\n');
+  const s = await run('setup', 'solution=' + testItp, 'worktrees=' + path.join(tmp, 'agents-runs'));
+  assert.equal(s.code, 0, s.err + s.out);
+  assert.match(s.out, /Agents \(installed in ~\/\.claude\/agents\):[^]*itp-research-runtime: installed[^]*itp-research-security: installed/);
+  assert.match(fs.readFileSync(path.join(home, 'itp-research', 'SKILL.md'), 'utf8'), /^name: itp-research$/m, 'the pack skill that runs them');
+  const runtime = fs.readFileSync(path.join(agents, 'itp-research-runtime.md'), 'utf8');
+  assert.ok(!runtime.includes('{{'), 'placeholders filled');
+  assert.ok(runtime.includes(testItp.replace(/\\/g, '/')), 'names the solution folder');
+  assert.match(runtime, /^name: itp-research-runtime$/m);
+  for (const f of fs.readdirSync(path.join(ROOT, 'packs/itp/agents'))) {
+    const head = fs.readFileSync(path.join(ROOT, 'packs/itp/agents', f), 'utf8').split('---')[1];
+    assert.match(head, new RegExp(`^name: ${f.replace(/\.md$/, '')}$`, 'm'), `${f}: its name matches the file`);
+    assert.match(head, /^description: .+$/m, `${f}: has a description`);
+    assert.match(head, /^model: (opus|sonnet)$/m, `${f}: names its model`);
+  }
+  // Again: nothing changes; a hand edit is kept as a backup before it is replaced.
+  assert.match((await run('setup')).out, /itp-research-runtime: up to date/);
+  fs.appendFileSync(path.join(agents, 'itp-research-business.md'), '\nmy edit\n');
+  assert.match((await run('setup')).out, /itp-research-business: updated \(your changed copy: itp-research-business\.md\.bak-\d{4}-\d\d-\d\d\)/);
+  assert.equal(fs.readFileSync(path.join(agents, 'itp-research-business.md'), 'utf8').includes('my edit'), false);
+  // An agent setup installed that the pack no longer ships: removed.
+  const notesFile = path.join(agents, '.orchestra-installed.json');
+  const notes = JSON.parse(fs.readFileSync(notesFile, 'utf8'));
+  fs.writeFileSync(path.join(agents, 'gone.md'), 'old agent\n');
+  notes['gone.md'] = (await import('node:crypto')).createHash('sha256').update('old agent\n').digest('hex');
+  fs.writeFileSync(notesFile, JSON.stringify(notes));
+  assert.match((await run('setup')).out, /gone: not in this pack, removed/);
+  assert.ok(!fs.existsSync(path.join(agents, 'gone.md')));
+  assert.equal(fs.readFileSync(path.join(agents, 'mine.md'), 'utf8'), 'my own agent\n', 'yours is never touched');
+  // Uninstall: Orchestra's agents go, yours stays.
+  const off = await run('setup', 'uninstall=yes');
+  assert.match(off.out, /agent itp-research-runtime/);
+  assert.ok(!fs.existsSync(path.join(agents, 'itp-research-runtime.md')));
+  assert.ok(!fs.existsSync(notesFile));
+  assert.ok(fs.existsSync(path.join(agents, 'mine.md')));
+  // No pack: no ITP agents.
+  const plainHome = path.join(tmp, 'agents-plain-home');
+  const plain = await proc([path.join(ROOT, 'bin/orch.mjs'), 'setup', 'worktrees=' + path.join(tmp, 'agents-runs')], { extraEnv: { ...env, ORCHESTRA_DATA_DIR: path.join(tmp, 'agents-plain-data'), ORCHESTRA_HOME_SKILLS: plainHome, ORCHESTRA_PACK: '' } });
+  assert.equal(plain.code, 0, plain.err + plain.out);
+  assert.doesNotMatch(plain.out, /itp-research/);
+  assert.ok(!fs.existsSync(`${plainHome}-agents`));
+});
+
 test('a "wait for me" step stops the run; next goes on; you are notified', async () => {
   const run = await startRun([{ id: 'hello', skill: 'orchestra-hello', wait: true }, { id: 'recap', skill: 'orchestra-recap' }]);
   assert.deepEqual((await hook(run, 'Stop', done('hello'))).body, {}, 'Claude stops at the gate');
