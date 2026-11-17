@@ -84,8 +84,9 @@ Feature keys; the branch and commit per repo; the depth and the file list; the l
 "no logs"); which of its lenses are on; today's date; and "Read only: never edit, commit, write to Teamspace or
 ITPKV, write no file. Return your findings as text in your FINDINGS / COULD NOT CHECK / SOURCES READ format."
 
-If the agents are not installed (an unknown `subagent_type`), say: "run `orch setup` to install the itp-research
-agents" and stop.
+If the agents are unknown (an unknown `subagent_type`), say: "the itp-research agents are not loaded. Run
+`orch setup` if you have not, then start a new Claude session: Claude Code reads the agent list only when a
+session starts." and stop.
 
 ## 5. Merge and rank
 
