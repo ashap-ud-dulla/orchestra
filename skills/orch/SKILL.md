@@ -148,6 +148,10 @@ branches. A cleaned run leaves the board (`orch runs all` still shows it) and ca
   deletes branches git sees as merged).
   To add it: `orch steps <template> add wrap-up label="Wrap up"`, with `wait=on` for the step before it.
   A run started before the step was added: `orch steps <run> add wrap-up label="Wrap up"`.
+- **"NOT cleaned up after its tab closed"** (a `!` line in `orch status`; you also got a Windows notification): the
+  clean after Wrap up did not happen. The line says why and what to do. Uncommitted work: show the files and ask
+  (commit, drop, or `force=yes` to lose them). A busy folder: close what runs from it (a terminal, an editor). Then
+  `orch clean <ticket>`; the line goes away once it is cleaned.
 - **What takes space**: `orch disk` (each run folder and the total).
 - **One run** with no Wrap up step, or kept (its tab must be closed): `orch clean <ticket>`. It does none of the Wrap up
   jobs; for those, the run's own tab (Wrap up) is the place.

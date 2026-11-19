@@ -75,6 +75,7 @@ function useEnv(extra = {}) {
     ORCHESTRA_STACKS: JSON.stringify([process.execPath, path.join(ROOT, 'test/fake-stacks.mjs')]),
     FAKE_DOCKER_STATE: path.join(tmp, 'fake-docker.json'),
     FAKE_STACKS_STATE: path.join(tmp, 'fake-stacks.json'),
+    ORCHESTRA_CLEAN_BUSY_WAIT_MS: '300',
     ...extra };
 }
 useEnv();
@@ -1588,6 +1589,23 @@ test('app: health asks 127.0.0.1 first (the api listens on IPv4 only)', async ()
   }
 });
 
+test('clean-up: a link the run replaced with its own folder (npm install) goes with the run; a non-link outside it is still refused', async () => {
+  const { remove } = await import(pathToFileURL(path.join(ROOT, 'lib/workspace.mjs')).href);
+  const ws = path.join(tmp, 'ws-replaced-link');
+  const outside = path.join(tmp, 'ws-outside-real');
+  fs.mkdirSync(path.join(ws, 'web', 'node_modules', 'pkg'), { recursive: true });
+  fs.writeFileSync(path.join(ws, 'web', 'node_modules', 'pkg', 'index.js'), 'x');
+  fs.writeFileSync(path.join(ws, '.orchestra-links'), path.join(ws, 'web', 'node_modules') + '\n');
+  await remove({ dir: ws, repos: [] });
+  assert.ok(!fs.existsSync(ws), 'the run folder and its own node_modules are gone');
+  // A links file that names a real folder outside the workspace: never deleted.
+  fs.mkdirSync(path.join(ws), { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(ws, '.orchestra-links'), outside + '\n');
+  await assert.rejects(remove({ dir: ws, repos: [] }), /refusing to remove .*it is not a link/);
+  assert.ok(fs.existsSync(outside), 'what is outside stays');
+});
+
 // ---- app slots: each run its own app (packs/itp/app/slots.mjs), with Docker and stacks.ps1 faked ----
 
 const slotFiles = () => ({ docker: path.join(tmp, 'fake-docker.json'), stacks: path.join(tmp, 'fake-stacks.json') });
@@ -2599,6 +2617,10 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     const failedLine = (lines) => lines.filter((t) => /could not clean up: refusing to delete/.test(t)).length;
     await waitFor(async () => failedLine(await logs(run8)) === 1, 'the failed clean-up to be logged');
     await waitFor(async () => !(await getRun(run8.id)).cleaning, 'the failed clean-up to end');
+    // You are told: the run needs you on the board, with the reason, and a notification was sent (off in tests).
+    assert.match((await getRun(run8.id)).cleanProblem?.why || '', /refusing to delete .*stray-link is still a link/);
+    assert.match((await orchText('status')).out, /! stuck clean: NOT cleaned up after its tab closed: refusing to delete .* · fix that, then: orch clean stuck clean/);
+    assert.ok((await logs(run8)).some((t) => /notification \(off\): not cleaned up after its tab closed/.test(t)));
     for (let i = 0; i < 3; i++) await orchText('status');
     await new Promise((res) => setTimeout(res, 1500));
     assert.equal(failedLine(await logs(run8)), 1, 'not tried again on every command');
@@ -2606,7 +2628,23 @@ test('clean up: only when you say; it stops what runs from the folder, frees the
     fs.rmSync(stray, { recursive: false, force: true });
     assert.match((await orchText('clean', run8.id)).out, /stuck clean: cleaned/, 'you can still clean it now');
     assert.equal((await getRun(run8.id)).autoCleanFailedAt, undefined);
+    assert.equal((await getRun(run8.id)).cleanProblem, undefined, 'cleaned: it needs you no more');
     assert.equal((await api('DELETE', `/api/runs/${run8.id}`)).status, 200);
+
+    // Uncommitted work when the tab closes: the folder is kept, and you are told (needs you, with the files).
+    const run9 = await startRun(null, { templateId: 'ws-wrap', input: 'dirty wrap' });
+    await hook(run9, 'Stop', done('hello'));
+    await hook(run9, 'UserPromptSubmit', { prompt: 'next' });
+    await hook(run9, 'Stop', done('wrapped'));
+    const dirtyRepo = (await getRun(run9.id)).workspace.repos[0].dir;
+    fs.writeFileSync(path.join(dirtyRepo, 'not-committed.txt'), 'x');
+    await close(await getRun(run9.id));
+    await waitFor(async () => (await getRun(run9.id)).cleanProblem, 'the kept clean-up to be told');
+    assert.ok(fs.existsSync(dirtyRepo), 'the work is kept');
+    assert.match((await orchText('status')).out, /! dirty wrap: NOT cleaned up after its tab closed: uncommitted work in api\. Commit or drop it, then: orch clean dirty wrap/);
+    fs.rmSync(path.join(dirtyRepo, 'not-committed.txt'));
+    assert.match((await orchText('clean', run9.id)).out, /dirty wrap: cleaned/);
+    assert.doesNotMatch((await orchText('status')).out, /dirty wrap/, 'cleaned: off the board');
 
     // Wrap up with "Keep the folder": closing the tab cleans nothing.
     const run5 = await startRun(null, { templateId: 'ws-wrap', input: 'keep me' });

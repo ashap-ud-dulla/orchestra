@@ -33,6 +33,13 @@
 - `orch app`: who has the shared app, who waits, whose code it serves. `orch app release <ticket>` takes it from a
   run that is stuck. `orch status` shows an `App:` line when someone has it or waits for it.
 
+## Free disk space on this PC
+
+"Free up disk space", "C: is full", "what takes my disk": use the **free-disk** skill (Skill tool, `free-disk`). It
+scans read-only in about 15 seconds (build output in the ITP repos, Temp, Recycle Bin, caches, hibernate file,
+Docker, Orchestra's run folders and slots), asks what to free, and frees only that, with a check before each.
+When the user means only Orchestra's runs ("clean my runs"), it is **Clean up** above.
+
 ## App slots: each run its own app
 
 Each run tests in its own copy of the ITP app (an itp-stacks stack): its own ports (`http://localhost:900n`), its
