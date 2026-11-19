@@ -12,8 +12,12 @@ Orchestra only touches ITP in four ways (all through `packs/itp`):
 1. Reads the skill list from `<ITP>/.claude/skills` (and your user skills folder).
 2. Creates git worktrees of ITP repos for runs (build step 4).
 3. Runs do their own work inside those worktrees. This includes starting the app from their workspace
-   (`bin/app.mjs` passes it to `packs/itp/app/app.mjs`; called by the `app-test` step): one run at a time, in line.
-   It stops only an app Orchestra started; the user's own app is stopped only after they say ok (`--force`).
+   (`bin/app.mjs` passes it to `packs/itp/app/app.mjs`; called by the `app-test` step). Usually each run's own app,
+   its **slot** (`packs/itp/app/slots.mjs`): a stack of ITP's `itp-stacks` skill (Orchestra only calls its
+   `stacks.ps1`) on a Docker Mongo copied from a "master" copy of the user's Local DB; `stacks=N` run at once (0 = off),
+   kept stopped between steps, deleted at clean-up (`pack.app.ownCopies`/`dropFor`). The one shared app (the user's
+   main stack, Global DB tests) goes one run at a time, in line. It stops only an app Orchestra started; the user's own
+   app is stopped only after they say ok (`--force`).
 4. Reads the Work Orders you hold (`orch mine`: `GET /api/me`, `GET /api/members/<id>/working-on` through ITP's
    own `registry_call`).
 

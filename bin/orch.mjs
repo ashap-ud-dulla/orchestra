@@ -21,10 +21,10 @@ const NO_APP = 'this solution has no app Orchestra can start (its pack adds one)
 function appPassthrough(argv) {
   if (!pack.app) fail(NO_APP);
   const raw = argv.slice(argv.indexOf('app') + 1).flatMap((a) => {
-    const m = /^(services|with|without|minutes|lines|force)=(.*)$/i.exec(a);
+    const m = /^(services|with|without|minutes|lines|force|fresh)=(.*)$/i.exec(a);
     if (!m) return [a];
     const key = m[1].toLowerCase();
-    if (key === 'force') return /^(yes|on|true)$/i.test(m[2]) ? ['--force'] : [];
+    if (key === 'force' || key === 'fresh') return /^(yes|on|true)$/i.test(m[2]) ? [`--${key}`] : [];
     return [`--${key}`, m[2]];
   });
   const env = { ...process.env };
@@ -39,7 +39,9 @@ const json = argv.includes('--json') || argv.includes('json=yes');
 try {
   const first = argv.find((a) => !a.startsWith('--'));
   const sub = argv[argv.indexOf(first) + 1];
-  if (first === 'app' && (['start', 'stop', 'restart', 'wait', 'logs'].includes(sub) || (sub === 'release' && !argv[argv.indexOf(first) + 2]))) appPassthrough(argv);
+  // The pack's own app words (its help lines name them: app slot, app golden, …) go to its script too.
+  const packWords = (pack.app?.help || []).map((h) => h.usage.split(/\s+/)[1]).filter(Boolean);
+  if (first === 'app' && (['start', 'stop', 'restart', 'wait', 'logs', ...packWords].includes(sub) || (sub === 'release' && !argv[argv.indexOf(first) + 2]))) appPassthrough(argv);
   const { name, pos, opt } = parse(argv);
   if (name === 'watch') {
     await watch(pos[0] || fail('name a run to watch'), !!opt.once, { rows: Number(opt.rows) || 0, cols: Number(opt.cols) || 0, pin: Number(opt.pin) || 1, scroll: Number(opt.scroll) || 0 });

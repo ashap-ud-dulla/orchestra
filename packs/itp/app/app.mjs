@@ -13,6 +13,13 @@
 //   release           let go of the app (it keeps running until the next run starts its own)
 //   stop [--force]    stop the app
 //   status            who has the app, who waits, and whose code it serves
+// Each run's own app, its slot (slots.mjs; settings stacks=N run at once, 0 = off):
+//   slot up [--services a,b] [--with a,b] [--without a,b] [--fresh] [--minutes N]   start this run's slot (made the
+//                     first time from the master copy); waits for room when N slots run
+//   slot stop | restart | fresh | drop | logs [service] | status
+//   outside a run:    slot <run> <verb> …  (pre-QA: slot <run> up wakes it and prints the link)
+//   slots             every slot, and the master copy
+//   master [refresh]  the master copy of your Local DB; refresh remakes it in the background (~30 min)
 // The run is read from ORCHESTRA_RUN_ID / ORCHESTRA_HOOK_TOKEN, set in each run's tab.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -25,6 +32,8 @@ import { appPorts, portOwners, stackPids, stopApp, brokersListening, hostsIn } f
 import { config } from '../../../lib/config.mjs';
 import * as launcher from './launcher.mjs';
 import { sleep, ordinal } from '../../../lib/util.mjs';
+import * as slots from './slots.mjs';
+import { findRun } from '../../../lib/cli/find.mjs';
 
 const NOT_MINE = 5; // exit code: the app runs from somewhere Orchestra did not start it
 
@@ -288,6 +297,63 @@ const commands = {
     say('The app is stopped.');
   },
 
+  // This run's own app (its slot). Outside a run: slot <run> <verb>.
+  async slot() {
+    const VERBS = ['up', 'stop', 'restart', 'fresh', 'drop', 'logs', 'status'];
+    const words = positional(1);
+    const verb = words.find((w) => VERBS.includes(w)) || 'status';
+    const rest = words.filter((w, i) => i !== words.indexOf(verb));
+    let run;
+    if (inRun()) {
+      const r0 = (await me()).run;
+      run = { id: r0.id, title: tabTitle(r0), ws: workspaceOf(r0) };
+    } else {
+      // The run: its key, the end of its id, or words from its name ("public cbc"); for logs, a last word that is a
+      // service name is the service.
+      if (verb === 'logs' && rest.length > 1 && slots.SERVICES.includes(rest.at(-1))) rest.unshift(rest.pop());
+      const ref = (verb === 'logs' ? rest.slice(1) : rest).join(' ');
+      if (verb === 'logs') rest.splice(1);
+      else rest.length = 0;
+      if (!ref) fail(`name the run (its key, words from its name, or the end of its id): app slot <run> ${verb}`);
+      run = await withRunner((r) => {
+        const r0 = findRun(r, ref);
+        return { id: r0.id, title: tabTitle(r0), ws: r0.workspace?.dir || null };
+      });
+    }
+    const opts = { services: option('services') ? list(option('services')) : undefined, withs: list(option('with')), withouts: list(option('without')), minutes: option('minutes') ? minutes() : 9 };
+    if (verb === 'up') return void (await slots.up(run, { ...opts, fresh: flag('fresh') }));
+    if (verb === 'fresh') return void (await slots.up(run, { ...opts, fresh: true }));
+    if (verb === 'restart') {
+      await slots.stop(run.id);
+      return void (await slots.up(run, opts));
+    }
+    if (verb === 'stop') return say(((await slots.stop(run.id)) || 'This run has no slot.').replace(/^./, (c) => c.toUpperCase()) + '.');
+    if (verb === 'drop') return say(((await slots.drop(run.id)) || 'This run has no slot.').replace(/^./, (c) => c.toUpperCase()) + '.');
+    if (verb === 'logs') return say(await slots.logs(run.id, rest[0] || 'api', Number(option('lines')) || 40));
+    const slot = slots.readState().slots[run.id];
+    if (!slot) return say(`${run.title} has no app slot yet. app slot up makes one (its own copy of your Local DB, ~4-6 min).`);
+    say((await slots.isRunning(slot)) ? slots.upText(slot, 'is up') : `${run.title}'s slot ${slot.n ?? ''} is stopped (its data kept). app slot up starts it (~2 min).`);
+  },
+
+  async slots() {
+    await slots.keepGolden();
+    say(await slots.listText(slots.readSettings()));
+  },
+
+  async master() {
+    const verb = positional(1)[0] || 'status';
+    if (flag('work')) return slots.goldenWork();
+    if (verb === 'refresh') {
+      await slots.startGoldenRefresh([fileURLToPath(import.meta.url), 'master', '--work']);
+      say(`Making a new master copy of your Local DB (${slots.hostOf(slots.goldenSource())}) in the background, about 30 minutes. It only reads your Local DB.`);
+      say('Slots keep using the old copy until it is done. orch app master shows how far it is.');
+      return;
+    }
+    if (verb !== 'status') fail('master takes: refresh, or nothing (status)');
+    await slots.keepGolden();
+    say(slots.goldenText());
+  },
+
   async status() {
     const { app, how } = await withRunner((r) => JSON.parse(JSON.stringify({ app: r.appState(), how: r.getSettings().launcher || launcher.DEFAULT_LAUNCHER })));
     const serving = readServing();
@@ -410,5 +476,5 @@ try {
   await run();
   process.exit(0);
 } catch (err) {
-  fail(err.message || String(err), err.status === 409 ? 3 : 1);
+  fail(err.message || String(err), err instanceof slots.SlotError ? err.code : err.status === 409 ? 3 : 1);
 }

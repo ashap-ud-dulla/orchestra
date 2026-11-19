@@ -69,9 +69,19 @@ const testItp = path.join(tmp, 'itp-base').replace(/\\/g, '/');
 fs.mkdirSync(path.join(testItp, '.claude', 'skills', 'review-changes'), { recursive: true });
 fs.writeFileSync(path.join(testItp, '.claude', 'skills', 'review-changes', 'SKILL.md'), '---\nname: review-changes\ndescription: a team skill\n---\nReview.\n');
 function useEnv(extra = {}) {
-  env = { ...baseEnv, ORCHESTRA_SOLUTION_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_PACK: 'itp', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'), ...extra };
+  env = { ...baseEnv, ORCHESTRA_SOLUTION_ROOT: testItp, ORCHESTRA_DATA_DIR: dataDir, ORCHESTRA_RUNS_DIR: runsDir, ORCHESTRA_CLAUDE_BIN: path.join(ROOT, 'test/fake-claude.mjs'), ORCHESTRA_NOTIFY: '0', ORCHESTRA_PACK: 'itp', ORCHESTRA_TERMINAL: 'none', ORCHESTRA_HOME_SKILLS: homeSkills, ORCHESTRA_USER_EMAIL: '', ORCHESTRA_CLAUDE_PROJECTS: path.join(tmp, 'claude-projects'),
+    // Tests never reach this PC's Docker or the itp-stacks script: the fakes stand in everywhere.
+    ORCHESTRA_DOCKER: JSON.stringify([process.execPath, path.join(ROOT, 'test/fake-docker.mjs')]),
+    ORCHESTRA_STACKS: JSON.stringify([process.execPath, path.join(ROOT, 'test/fake-stacks.mjs')]),
+    FAKE_DOCKER_STATE: path.join(tmp, 'fake-docker.json'),
+    FAKE_STACKS_STATE: path.join(tmp, 'fake-stacks.json'),
+    ...extra };
 }
 useEnv();
+// The ITP pack turns app slots on by default (each run its own app); the app-line tests are about the one shared app.
+// The slot tests turn them on for themselves.
+fs.mkdirSync(dataDir, { recursive: true });
+fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ stacks: '0' }));
 
 function proc(args, { input = '', extraEnv = {} } = {}) {
   return new Promise((resolve) => {
@@ -1575,6 +1585,126 @@ test('app: health asks 127.0.0.1 first (the api listens on IPv4 only)', async ()
     assert.match((await app(null, 'status')).out, /Answers: api yes · web yes/);
   } finally {
     v4.kill();
+  }
+});
+
+// ---- app slots: each run its own app (packs/itp/app/slots.mjs), with Docker and stacks.ps1 faked ----
+
+const slotFiles = () => ({ docker: path.join(tmp, 'fake-docker.json'), stacks: path.join(tmp, 'fake-stacks.json') });
+const slotEnv = (run, extra = {}) => ({
+  ...(run ? { ORCHESTRA_RUN_ID: run.id, ORCHESTRA_HOOK_TOKEN: run.hookToken } : {}),
+  ORCHESTRA_DOCKER: JSON.stringify([process.execPath, path.join(ROOT, 'test/fake-docker.mjs')]),
+  ORCHESTRA_STACKS: JSON.stringify([process.execPath, path.join(ROOT, 'test/fake-stacks.mjs')]),
+  FAKE_DOCKER_STATE: slotFiles().docker,
+  FAKE_STACKS_STATE: slotFiles().stacks,
+  ...extra,
+});
+const slot = (run, ...args) => proc([path.join(ROOT, 'bin/app.mjs'), 'slot', ...args], { extraEnv: slotEnv(run) });
+const slotSettings = async (n) => {
+  const s = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf8'));
+  fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ ...s, stacks: String(n) })); // each process reads it
+};
+function freshSlots() {
+  for (const f of Object.values(slotFiles())) fs.rmSync(f, { force: true });
+  fs.writeFileSync(slotFiles().docker, JSON.stringify({ volumes: { 'orch-golden-t': { created: '2026-11-19T10:00:00Z' } }, containers: {}, calls: [] }));
+  fs.writeFileSync(path.join(dataDir, 'slots.json'), JSON.stringify({ golden: { volume: 'orch-golden-t', at: new Date().toISOString(), gb: 1 }, slots: {}, want: {} }));
+}
+const fakeState = (which) => JSON.parse(fs.readFileSync(slotFiles()[which], 'utf8'));
+
+test('slots: each run gets its own app from the master copy; N run at once, the next waits; stop frees room and keeps data; drop deletes', async () => {
+  freshSlots();
+  await slotSettings(2);
+  const a = await startRun();
+  const b = await startRun();
+  const c = await startRun();
+  try {
+    const upA = await slot(a, 'up');
+    assert.equal(upA.code, 0, upA.err);
+    assert.match(upA.out, /Copying the master copy/);
+    assert.match(upA.out, /This run's app is up .*: http:\/\/localhost:9001/);
+    assert.ok(fakeState('docker').calls.some((x) => x.includes('-v orch-golden-t:/from:ro') && x.includes(`orch-slot-${a.id}:/to`)), 'its own data is a copy of the master copy');
+    assert.match(fakeState('stacks').calls[0], /^new -Mongo 2726\d -Only api,primary,secondary,webclient -ApiRepo/);
+    assert.match((await slot(b, 'up')).out, /localhost:9002/);
+
+    // Two run: the third waits its turn, first come first served (exit 3: run it again to keep the place).
+    const waitC = await slot(c, 'up', '--minutes', '0');
+    assert.equal(waitC.code, 3);
+    assert.match(waitC.out, /Waiting for a slot: 1st in line/);
+
+    // a stops: its data stays, and c gets the room.
+    assert.match((await slot(a, 'stop')).out, /Stopped its app slot 1 \(data kept\)/);
+    assert.ok(fakeState('docker').volumes[`orch-slot-${a.id}`], 'a keeps its data');
+    assert.match((await slot(c, 'up', '--minutes', '0')).out, /localhost:9003/);
+
+    // a again: now it waits (b and c run); its data is not copied again.
+    assert.equal((await slot(a, 'up', '--minutes', '0')).code, 3);
+    await slot(b, 'drop');
+    const copies = fakeState('docker').calls.filter((x) => x.includes(`orch-slot-${a.id}:/to`)).length;
+    const again = await slot(a, 'up', '--minutes', '0');
+    assert.equal(again.code, 0, again.err);
+    assert.equal(fakeState('docker').calls.filter((x) => x.includes(`orch-slot-${a.id}:/to`)).length, copies, 'no new copy: it keeps its data');
+    assert.ok(fakeState('stacks').calls.includes('start 1 -Only api,primary,secondary,webclient'), 'the same stack starts again');
+    assert.ok(fakeState('stacks').calls.includes('destroy 2'), 'drop destroys the stack');
+    assert.equal(fakeState('docker').volumes[`orch-slot-${b.id}`], undefined, 'and its data');
+
+    // fresh: the data is copied from the master copy again.
+    await slot(a, 'fresh');
+    assert.equal(fakeState('docker').calls.filter((x) => x.includes(`orch-slot-${a.id}:/to`)).length, copies + 1);
+
+    // From outside a run (pre-QA): the run by name; the board lists every slot.
+    const outside = await proc([path.join(ROOT, 'bin/orch.mjs'), 'app', 'slot', c.id, 'status'], { extraEnv: slotEnv(null) });
+    assert.match(outside.out, /This run's app is up: http:\/\/localhost:9003/);
+    const board = await proc([path.join(ROOT, 'bin/orch.mjs'), 'app', 'slots'], { extraEnv: slotEnv(null) });
+    assert.match(board.out, /App slots: 2 of 2 running/);
+    assert.match(board.out, /Master copy: from/);
+  } finally {
+    for (const r of [a, b, c]) await close(r);
+    await slotSettings(0);
+  }
+});
+
+test('slots: a step that uses the app waits for no shared line when runs have their own; cleaning the run deletes its slot', async () => {
+  freshSlots();
+  await slotSettings(3);
+  const a = await startRun([{ id: 'app', skill: 'orchestra-hello', app: true }]);
+  const b = await startRun([{ id: 'hello', skill: 'orchestra-hello' }, { id: 'app', skill: 'orchestra-recap', app: true }]);
+  try {
+    await hook(b, 'Stop', done('hello'));
+    const now = await getRun(b.id);
+    assert.equal(now.appNext, undefined, 'no wait for the shared app');
+    assert.equal(now.steps[1].status, 'running', 'its app step starts at once, beside a\'s');
+    // The shared app stays for runs that ask for it (the Global DB): take still queues.
+    assert.match((await app(a, 'take', '--minutes', '0')).out, /You have the app/);
+    // The run's slot goes with the run's clean-up.
+    assert.equal((await slot(b, 'up')).code, 0);
+    await close(b);
+    const cleaned = await proc([path.join(ROOT, 'bin/orch.mjs'), 'clean', b.id, 'force=yes'], { extraEnv: slotEnv(null) });
+    assert.equal(cleaned.code, 0, cleaned.err);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'slots.json'), 'utf8')).slots[b.id], undefined, 'clean deleted its slot');
+    assert.equal(fakeState('docker').volumes[`orch-slot-${b.id}`], undefined, 'and its data');
+  } finally {
+    for (const r of [a, b]) await close(r);
+    await slotSettings(0);
+  }
+});
+
+test('slots: a start refused for memory is tried once more; a service asked for by name must be built; stacks=0 turns slots off', async () => {
+  freshSlots();
+  await slotSettings(1);
+  const a = await startRun();
+  try {
+    const failOnce = await proc([path.join(ROOT, 'bin/app.mjs'), 'slot', 'up'], { extraEnv: slotEnv(a, { FAKE_STACKS_FAIL: 'new' }) });
+    assert.notEqual(failOnce.code, 0, 'fails both times here (the fake always refuses new)');
+    assert.match(failOnce.out, /Memory is short right now/);
+    assert.equal(fakeState('stacks').calls.filter((x) => x.startsWith('new')).length, 2, 'tried twice');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'slots.json'), 'utf8')).slots[a.id]?.state, 'stopped', 'its data stays; the next up tries again');
+    const unknown = await slot(a, 'up', '--with', 'nosuch');
+    assert.match(unknown.err, /unknown service: nosuch/);
+    await slotSettings(0);
+    assert.match((await slot(a, 'up')).err, /app slots are off/);
+  } finally {
+    await close(a);
+    await slotSettings(0);
   }
 });
 

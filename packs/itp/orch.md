@@ -26,12 +26,42 @@
   Start: `orch start bug-template <ticket>`.
 - **Testing in the app**: add the step `app-test` after the build, with the app on:
   `orch steps <id> add app-test app=on label="Test in the app"` (only when the user asks for it).
-  `app=on` makes the run wait in the app line (first come, first served) with its tab free, and start the step by
-  itself when the app is free; it is a light step, so it never waits for a heavy slot. It asks the user for the test
-  data, tests the ticket, fixes (after 2 rounds it asks before another), and stops the app when it ends. Suggest turning `app` off on build steps (`execute-epics` never starts the app),
-  so builds stop waiting for each other; change it only if the user says yes.
-- `orch app`: who has the app, who waits, whose code it serves. `orch app release <ticket>` takes it from a run
-  that is stuck. `orch status` shows an `App:` line when someone has it or waits for it.
+  It builds the run's code, starts **the run's own app (its slot)**, runs AI browser checks (Playwright) first, then
+  hands the app to the user with a pinned click path, and fixes (after 2 rounds it asks before another). Global DB
+  tests use the one shared app (in line). Suggest turning `app` off on build steps (`execute-epics` never starts
+  the app); change it only if the user says yes.
+- `orch app`: who has the shared app, who waits, whose code it serves. `orch app release <ticket>` takes it from a
+  run that is stuck. `orch status` shows an `App:` line when someone has it or waits for it.
+
+## App slots: each run its own app
+
+Each run tests in its own copy of the ITP app (an itp-stacks stack): its own ports (`http://localhost:900n`), its
+own RabbitMQ vhost and Redis, and **its own copy of the user's Local DB**, copied from a "master" copy in ~1 min. Runs
+test side by side; only `stacks` of them run at once (`orch settings stacks=N`, 3 by default; 0 = off: every run
+uses the one shared app, in line). Needs Docker Desktop running.
+
+- A slot lives as long as its run: made at the first test, **stopped** between steps (no RAM, data kept), deleted when
+  the run is cleaned up or deleted. Its data stays between test rounds and for QA.
+- **Plain words work**; turn them into these commands. The run is named the way the user names it: its ticket or
+  Work Order key (`SA-W-037`), words from its name (`public cbc`), or the end of its id (`abecb3`).
+  | They say | Do |
+  |---|---|
+  | "what's the address of the CbC app", "where is my app for SA-W-037" | `orch app slots` (or `orch app slot <run> status`): give the link |
+  | "QA is here for SA-W-037", "start the app of public cbc" | `orch app slot <run> up minutes=9`: give the link |
+  | "stop the CbC app" / "clean data for …" / "delete its app" | `orch app slot <run> stop` / `fresh` / `drop` (ask first for fresh and drop) |
+  | "refresh the master copy", "my Local DB changed" | `orch app master refresh` |
+- `orch app slots`: every slot (run, running or stopped, link, data date), free disk, and the master copy.
+- **Pre-QA hand-over** ("QA is here for ABC-1"): `orch app slot ABC-1 up` (give the Bash tool 600000 ms and add
+  `minutes=9`). It wakes the run's slot with the run's newest build and prints the link to hand over; the page signs
+  in by itself as the user's usual user. When QA is done: `orch app slot ABC-1 stop`.
+- `orch app slot <ticket> fresh`: clean data (the master copy again; what was set up in the slot is lost: ask first).
+  `drop`: deletes the slot and its data now (ask first). `logs [service]`: a service's log.
+- **The master copy** every new slot starts from: `orch app master` (its date, size, a refresh in progress).
+  `orch app master refresh` remakes it from the user's Local DB in the background (~30 min, reads it only). Offer it
+  when `orch status` says it is old, or when a test needs data that is newer than the copy.
+- "Waiting for a slot": N slots run. Say who has them; the user may stop one, or allow more (`stacks=N`; each running
+  slot takes ~2 GB RAM; Docker's own memory is capped in `%USERPROFILE%\.wslconfig`).
+- A slot refused for disk names the stopped slots of other runs: offer to clean those runs, or `drop` a slot.
 
 ## The app for you
 
@@ -51,7 +81,8 @@ launcher as runs (AppHost by default, per-service logs in `<checkout>/.run-logs/
   "The app is up …" with the Aspire dashboard line. Show it, and say which DB it runs on and whether Mission is on.
   `with=outsider` adds Outsider; `without=mission` leaves Mission off; `services=webclient,api,…` sets the
   whole list. `orch app restart` keeps the same services.
-- While the user has it, runs that want the app wait in line. Say so in one line.
+- With app slots on, runs test in their own apps, so the user's app keeps nobody waiting; only a run that needs the
+  Global DB waits for it (`app take`). With slots off, runs that want the app wait in line. Say so in one line.
 - **A run has the app**: the start is refused and names the run and what it does. Do not take it by yourself: offer
   to wait, or `orch app release <ticket>` (it takes the app from that run, mid-step) only after the user says so.
 - "Not up yet": `orch app wait minutes=9`. Exit code 5 ("not started by Orchestra"): something else holds the ports

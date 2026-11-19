@@ -1,23 +1,30 @@
 ---
 name: app-test
-description: Orchestra step "Test in the app" (human in the loop). Builds this run's code, starts the ITP app from this run's workspace (waiting in line, because only one copy can run), hands the app to the user with an exact click path, and fixes what the user reports (after 2 rounds it asks before another). The user tests; the AI does not drive the browser unless asked. Stops the app when the step ends. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
+description: Orchestra step "Test in the app". Builds this run's code and starts this run's OWN copy of the ITP app (its app slot - own ports, own copy of your Local DB - so runs test side by side, no line), runs AI browser checks with Playwright first, then hands the app to the user with an exact click path, and fixes what fails (after 2 rounds it asks before another). Global DB tests use the one shared app (in line). The slot stays with the run (stopped between steps, data kept) for later rounds and for QA. Use as an Orchestra template step after the build, or at any later step to start the app again for QA ("preqa").
 ---
 
 # Test in the app
 
-You are a step in an Orchestra run. Only one copy of the ITP app can run on this PC, so runs take turns.
-`app` below means this command, run from the current folder (this run's workspace) with the **Bash** tool:
+You are a step in an Orchestra run. `app` below means this command, run from the current folder (this run's
+workspace) with the **Bash** tool:
 
 ```
 node {{ORCHESTRA}}/bin/app.mjs <command>
 ```
 
-Commands that wait (`take`, `start`, `wait`) take `--minutes 9`: give the Bash tool a timeout of 600000 ms.
-When one ends with "Still waiting" or "Not up yet", just run it again, but see 3.5 first: that message can be wrong.
+Commands that wait (`slot up`, `take`, `start`, `wait`) take `--minutes 9`: give the Bash tool a timeout of
+600000 ms. Exit code 3 ("Still waiting … run it again") means: run the same command again; it keeps its place.
 
-**The user tests, you build and start.** The user clicks through the app in their own browser. You do not drive
-a browser, unless the user asks you to. Your jobs: a correct build, an app that is really up with every service the test
-needs, an exact click path, the logs read when something fails, and fixes.
+## Two ways to get the app
+
+| | **This run's own app (its slot)** - the usual way | **The one shared app** |
+|---|---|---|
+| What | An itp-stacks stack: its own ports (web `900n`), RabbitMQ vhost, Redis, and its own copy of the user's **Local DB** (made from a "master" copy) | The user's main app (web 9000), with their `Debug.json` |
+| Waits for | Nothing, unless N slots already run (`orch settings stacks=N`) | Every other run that has it (first come, first served) |
+| Data | Its own: what you or the user set up stays for the next round and for QA. "Fresh data" resets it. | The real Local DB or Global DB, shared with the user |
+| Use it for | Every test on the **Local DB** | Tests that need the **Global DB** (shared server; slots copy only the Local DB), or when slots are off or Docker is not on this PC |
+
+`app slot status` says whether slots are on and what this run's slot is doing.
 
 ## 1. Plan the test (no app needed)
 
@@ -27,175 +34,145 @@ needs, an exact click path, the logs read when something fails, and fixes.
   - **Screens**: which page, what to click or change, what must show after saving.
   - **Templates**: which template or sheet to fill or upload, and what the result must be.
   - **Downloads**: which XML / Excel / PDF to download, and what must be inside.
-- Work out the **exact data** for the user: which project, which dialog values (form type, country, version, entity,
-  year, file). Look at the file or ticket for the values instead of making the user guess. Say which ones you could not
-  check yourself.
+- Work out the **exact data**: which project, which dialog values (form type, country, version, entity, year, file).
+  Look at the file or ticket for the values instead of making the user guess. Say which ones you could not check.
+- Mark each check **AI can check** (a click path with a visible result: a value on screen, a saved row, a downloaded
+  file's content) or **needs the user's eyes** (looks right, a judgement, an outside system).
 
 ## 2. Ask the user (AskUserQuestion, in one go)
 
-- Show the test plan so the user can correct it. Never guess a login (there is none on localhost) or a company.
-- **The services and the DB in one question**, a click, not a talk: one option names the whole start, for example
-  **"Global DB · no Outsider · no Mission · Scheduler on (Recommended)"**, and one or two others differ only where this
-  ticket may need it (Local DB; Mission on for a XatBot ticket). Each option lists every service it starts or leaves out,
-  so the user sees what they get. The details for the options:
-- **Which services to start.** `app start` alone starts the usual set, and prints it. With the AppHost launcher
-  (the default, `orch settings` shows it) that is the **web app, Platform API, Primary, Secondary, the Spreadsheet Job,
-  the Scheduler, the MCP consumer, the dev IdP**, and the **Mission consumer** when the branch has it (unless
-  `MissionApis=","` keeps XatBot on Primary). The user usually does **not** need **Outsider**: always ask about it,
-  with "no" as the expected answer. Only start it when the user says yes (`--with outsider`).
-- **The Mission consumer**, when the workspace has it (`ITP-API/Orbitax.Platform.Api/Applications/Orbitax.MissionPlatform.Consumer`
-  exists): ask too. The usual answer is **no**; say **yes** first only when the ticket touches XatBot or Mission.
-  No adds `--without mission`: XatBot commands then go to Primary for this start (`ITP_MissionApis=","`), so they
-  do not hang; the user's Debug.json is not changed.
-- **Which database: Global DB or Local DB.** Read which one is active now (see "Switching the database" below) and say
-  it in the question. The user may need one for one check and the other for the next (for example the data of one
-  project lives only on the Local DB). Projects, entities and forms differ between the two: tell the user that.
-- If the question dialog shows no text step for "Other", ask the open questions in plain chat instead and wait.
-
-## Switching the database (Global DB / Local DB)
-
-The choice lives in the user's `Debug.json`: `ITP_DebugJsonPath` if set, else `C:\LocalStore\Debug.json`. It has two
-blocks of keys marked `// Global DB` and `// Local DB`; exactly one is active and the other is commented out with `//`.
-The keys are `MongodbConnection`, `MongodbDemoConnection`, `MongodbGlobalConnection`, `MongodbAppConnection` (Global block
-only), `DevPrefix` and `GlobalPrefix`. The services read the file **only when they start**, so every switch needs a
-restart of the .NET services (the web app does not read it).
-
-- **Read the active DB without printing secrets:** show only the block heading that has uncommented keys and the host
-  and prefix values of its connection lines. Never print other keys of the file (it holds tokens and keys).
-- **Switch only when the user says yes**, each time. It is their personal file outside the repo and the Global DB is a
-  shared server. Show the exact lines you will comment and uncomment first.
-- **Back up first:** copy it to `Debug.json.bak-before-<db>-switch-<date>` in the same folder.
-- **Edit only the two blocks:** comment the keys of the active block, uncomment the keys of the other block. Touch no
-  other line. Keep the tabs.
-- **Restart:** `app restart --minutes 9` (the services this run started). With the AppHost it stops and starts the
-  whole app (one service alone needs the aspire CLI, not set up yet); the relaunch rebuilds what changed. With
-  run-stack it restarts only the .NET services you name: `app restart api,primary,secondary,spreadsheet --minutes 9`.
-  Then do the up-check of 3.5 again; a cold start took about 10 minutes. Tell the user to reload the page (Ctrl+F5)
-  and check the project picker.
-- **Say in the handover and the report which DB the test ran on, and whether it is still switched.** Offer to put it
-  back (the backup file); never switch back by yourself.
+- Show the test plan so the user can correct it.
+- **Where and what to start, in one click.** One option names the whole start, for example
+  **"Own app · Local DB copy · api, primary, secondary, web (Recommended)"**. Add an option for the shared app with the
+  Global DB only when a check needs Global data, and one with Mission on for a XatBot ticket. Each option lists what it
+  starts, so the user sees what they get.
+- **Services** (names: `api, primary, secondary, webclient, mission, outsider, spreadsheet`). The usual set is
+  api, primary, secondary and the web page. Without Primary and Secondary anything that saves, uploads, imports or
+  generates spins for ever. Mission only for XatBot / Mission work (`--with mission`); Outsider only when the user says
+  yes (`--with outsider`). A service the run never built is left out with a note; one you ask for by name must be built
+  (it prints the build line).
+- **Data in the slot**: say it is the run's own copy of the Local DB, made on the date `app slot up` prints. If the
+  test needs data the copy does not have (made after the master copy), say so: the user can set it up in the slot
+  (it stays), or refresh the master copy (`orch app master refresh`, ~30 min) and then `app slot fresh`.
 
 ## 3. Get the app
 
-1. `app build`: builds this run's code while you wait (no turn needed). Fix build errors before you go on.
-2. `app take --minutes 9`: waits in line. It prints your place ("2nd in line, ITP2-… has it"). When this step uses the
-   app (`app=on`, the usual), Orchestra started it only once the app was free and the app is already this run's:
-   `app take` answers at once. Never loop on it.
-3. If the user wants the other database than the active one, switch it **before** you start (see "Switching the
-   database"), so the app starts once on the right one.
-4. Start the app with the services from step 2: `app start --minutes 9`, plus `--with outsider` only if the user said
-   yes, and `--without mission` if they said no to Mission. `--services webclient,api,…` sets the whole list instead (names: `webclient, api, primary, secondary,
-   spreadsheet, mission, scheduler, mcp, idp, outsider`). Do not set `ORCHESTRA_APP_START` and do not call
-   `run-stack.ps1` or `dotnet run` on the AppHost yourself: `app start` picks the launcher from Orchestra's setting.
-   - **AppHost launcher**: it writes this run's resource list to the AppHost's gitignored `appsettings.local.json`
-     in this worktree (keeping your own settings in it, like the webclient's `scriptName`), with Redis and RabbitMQ off
-     when they already run on this PC (Windows services, no Docker). Then it runs the AppHost with the http profile.
-     It prints the **Aspire dashboard** login line once it is up (also in `app status`).
-   - A branch with no AppHost (old branches) fails with a plain message. Then the user can run
-     `orch settings launcher=runstack` (run-stack.ps1 has no Mission consumer and no Scheduler).
+### 3a. This run's own app (the usual way)
 
-   A cold start takes many minutes (the .NET services compile). Without Primary and Secondary, anything that saves,
-   uploads, imports or generates spins for ever: the api queues the command and nothing picks it up (the api log keeps
-   polling `CommandResponseById`). On a Mission branch the same happens to XatBot commands without the Mission
-   consumer. Screens that only read data work without them.
-   - Exit code 5, "Orchestra did not start it": the app runs from somewhere Orchestra did not start (the user's own
-     checkout or their own AppHost, or an earlier start of this run). Ask the user. Only after they say ok, run
-     `app start --force`.
-   - "Note: the dev IdP … cannot start": the web login (:10203) will not work. Tell the user what is missing (it names
-     the file); they make `teamspace-agent/debug.json` from `debug.json.example`. Never copy keys into it yourself.
-5. **Check it is really up.** `app wait` checks 127.0.0.1 and localhost. To be sure: `curl http://127.0.0.1:50544/health` returns 200 and `Healthy`,
-   `curl http://localhost:9000/` returns 200, and the ports of the services you started listen on 127.0.0.1
-   (Platform API 50544, Outsider 50545, Primary 50546, Secondary 50547, MCP 50548, Scheduler 50549, Mission 50550;
-   the Spreadsheet Job has no port). With the AppHost, the dashboard shows each service's state too.
-6. **If it does not start.** Read `.run-logs\orchestra-start.log` (the launcher's console: the AppHost's build and
-   start lines, or run-stack's) and `app logs`. Fix what you can (a build error, `npm install` in ITP-WebClient when
-   :9000 never answers after a branch switch), then `app start` again. Do not start the app by hand.
+1. `app build`: builds this run's code (no turn needed). Fix build errors before you go on.
+2. `app slot up --minutes 9` (add `--with …` / `--without …` / `--services …` as picked). The first time it copies the
+   master copy into the run's own data (~1 min) and makes the stack (~2-5 min); later times it just starts it (~2
+   min), taking the newest build and rebuilding the web page only when the web code changed. It prints the link
+   (`http://localhost:900n`) and the api. **The page signs in by itself** as the user's usual user: no login, no IdP.
+   - "Waiting for a slot: … in line": N slots run already. Run the same command again (exit 3) and tell the user
+     who has the slots; they may stop one (`orch app slot <run> stop`) or allow more (`orch settings stacks=N`).
+   - "no master copy": tell the user `orch app master refresh` (in the background, ~30 min, reads their Local DB
+     only). Meanwhile you may use the shared app (3b) if they agree.
+   - "Docker is not running" / "not installed": tell the user (start Docker Desktop). Meanwhile 3b.
+   - Any other error: show its last lines; `app slot logs <service>` reads a service's log.
+3. Check it is up: `curl http://localhost:<api port>/api/...` answers (401 without a token is fine: the page adds it),
+   and the web link answers 200.
 
-The app is at http://localhost:9000 (api http://localhost:50544).
+### 3b. The one shared app (Global DB, or no slots)
 
-## 4. Hand over
+1. `app build`.
+2. `app take --minutes 9`: waits in line for the shared app. It prints your place.
+3. The database: the choice lives in the user's `Debug.json` (see "Switching the database" below). Switch **before**
+   you start, so the app starts once on the right one.
+4. `app start --minutes 9` (plus `--with outsider`, `--without mission` as picked). It picks the launcher from
+   Orchestra's setting (the AppHost by default; it prints the Aspire dashboard login). Do not run `run-stack.ps1` or
+   `dotnet run` yourself. Exit code 5 ("Orchestra did not start it"): the user's own app runs; ask before
+   `app start --force`.
+5. Check: `curl http://127.0.0.1:50544/health` returns 200 and `http://localhost:9000/` returns 200.
+6. It does not start: read `.run-logs\orchestra-start.log` and `app logs`, fix what you can, `app start` again.
 
-- **No live log watcher.** Do not start a Monitor or `tail -F` on the logs while the user tests: the user watches
-  each service's console in the **Aspire dashboard** (its login line is in `app status`; give it to the user). Note the
-  time the user starts testing, for step 7.
-- **The log files stay, for you.** With the AppHost, Orchestra copies each service's console into
-  `.run-logs/<service>.log` while the app runs, as plain text (`app logs` lists them: `api.log`, `primary.log`,
-  `secondary.log`, `mission.log`, …). You read them when something fails (step 5) and once at the end (step 7).
-- **"Live logs: none yet"** a minute after the app is up means Orchestra's log copier found no Aspire files. Tell the
-  user plainly (Orchestra needs a fix): you cannot read the logs then, only the user can, in the dashboard.
-- **Tell the user, in plain words:** the app is up (list each service and its state), **which DB it runs on (Global or
-  Local)**, what state you changed in the app (for example the selected project), the **exact click path**, the **exact values** to pick in each dialog, and what
-  they should see after each step. Leave out anything you did not check, and say that you did not check it.
-- **Pin the test steps.** Write the click path, the values and what to see once, between a line
-  `ORCHESTRA:PIN Test steps` and a line `ORCHESTRA:END` (numbered, short lines; the DB and the project at the top).
-  Orchestra keeps a copy in the pane on the right, so the user can follow it while you talk. After a fix round that
-  changes the steps, pin the new steps the same way (the newest pin shows first).
-- Do not open a browser or touch the app while the user tests. Tell the user to press F12 and look at the Console and
-  Network tabs for red lines the api logs cannot show.
+### Switching the database (shared app only)
+
+The choice lives in the user's `Debug.json`: `ITP_DebugJsonPath` if set, else `C:\LocalStore\Debug.json`. It has two
+blocks of keys marked `// Global DB` and `// Local DB`; exactly one is active and the other is commented out with `//`.
+The services read it only when they start, so every switch needs `app restart --minutes 9`.
+
+- **Never print secrets:** show only which block is active and the host and prefix values of its connection lines.
+- **Switch only when the user says yes**, each time; the Global DB is a shared server. Show the exact lines first.
+- **Back up first** (`Debug.json.bak-before-<db>-switch-<date>`), **edit only the two blocks**, keep the tabs.
+- Say in the handover and the report which DB the test ran on and whether it is still switched. Never switch back by
+  yourself; offer it.
+
+## 4. AI checks first, then the user
+
+**AI checks (Playwright), for every check marked "AI can check".** Follow
+`{{SOLUTION}}/.claude/skills/run-playwright-automation/SKILL.md` for this run's epic, with `--no-start` and
+`--url <the app's web link>` (the slot's `http://localhost:900n`, or `http://localhost:9000` for the shared app).
+Use **one** browser window for the whole test: start Chrome once (headed, `--remote-debugging-port=9222`, its own
+`--user-data-dir` under `.orchestra-test/`), attach each script with Playwright `connectOverCDP`, never close the
+browser from a script, never launch one browser per script. Screenshots go in `.orchestra-test/`.
+
+- A check that fails: read the logs for that moment (below), fix, rebuild, `app slot up` again (it takes the new
+  build), and run the failed checks again. This counts toward the fix rounds (section 5).
+- Then show a short table: each AI check, passed or failed, with its screenshot path.
+
+**Then hand over to the user**, for the checks that need their eyes (and anything they want to see themselves):
+
+- Tell them, in plain words: the link, which services run, **which data** (the slot's Local DB copy and its date, or
+  the shared app's DB), what state you changed (the selected project, records the AI checks made), the **exact click
+  path**, the **exact values**, and what they should see. Leave out what you did not check, and say so.
+- **Pin the steps**: the click path, values and what to see, between a line `ORCHESTRA:PIN Test steps` and a line
+  `ORCHESTRA:END` (numbered, short lines; the link and the data at the top). After a fix round that changes them, pin
+  the new steps the same way.
+- Do not drive the browser while the user tests. Tell them to press F12 and look at Console and Network for red lines.
+- **No live log watcher** (no Monitor, no `tail -F`). Note the time the user starts, for the log check in section 7.
 - Wait for the user. They report pass or fail per check.
 
-## 5. The user reports a failure
+**Logs.** Slot: `app slot logs <service>` (`api`, `primary`, `secondary`, `mission`, `webclient`; `--lines 200` for
+more). Shared app: `app logs [service]` (`.run-logs/<service>.log`; with the AppHost also the Aspire dashboard).
+Look for `^fail:`, `Unhandled exception`, `Exception:`, `ERROR` and HTTP 5xx lines.
 
-- Read the log files for that moment (the time they give you, or the last minutes), every service the action goes
-  through (api, then primary / secondary / mission for saves, uploads and XatBot). Look for `^fail:`,
-  `Unhandled exception`, `Exception:`, `ERROR` and HTTP 5xx lines. The user may paste lines from the Aspire dashboard
-  instead: use those. Say whether it is an api error or a screen problem.
-- Find the cause and fix the code (in this run's worktrees only), then restart what changed (`app start` again with the
-  same services, or just the web app for a WebClient-only change) and ask the user to retry the failed checks, then the
-  rest quickly. **After 2 fix rounds**, ask with a click: **Another round** (say what you would try
-  next) · **Stop and report** (say what fails and what you tried, then end with `ORCHESTRA:FAILED`). Ask again after each
-  further round.
+## 5. A check fails
 
-- **The user needs the other DB for the next check** (for example CbC on Local, then GIR on Global): follow "Switching
-  the database" (ask, back up, edit the two blocks, restart the .NET services, up-check, tell the user to reload).
-  Switching is not a fix round and does not count toward the 2.
+- Read the logs for that moment, every service the action goes through (api, then primary / secondary / mission for
+  saves, uploads and XatBot). Say whether it is an api error or a screen problem.
+- Find the cause and fix the code (in this run's worktrees only), `app build`, then `app slot up` again (it restarts
+  with the new build; `app slot restart` forces a restart) - or `app start` again for the shared app. Run the failed
+  checks again (AI checks yourself; the user's checks: ask them), then the rest quickly.
+- **After 2 fix rounds**, ask with a click: **Another round** (say what you would try next) · **Stop and report** (say
+  what fails and what you tried, then end with `ORCHESTRA:FAILED`). Ask again after each further round.
+- The data in the slot looks wrong or used up: offer **Fresh data** (`app slot fresh`: the master copy again, ~1 min;
+  what was set up in the slot is lost). Not a fix round.
+- A check needs the Global DB: test it on the shared app (3b). Not a fix round.
 
-## 6. Optional: AI-driven browser tests
+## 6. Report
 
-Only when the user asks for it. Then follow `{{SOLUTION}}/.claude/skills/run-playwright-automation/SKILL.md`
-for this run's epic, with `--no-start`. Use **one** browser window for the whole test: start Chrome once (headed,
-`--remote-debugging-port=9222`, its own `--user-data-dir` under `.orchestra-test/`), attach each script with Playwright
-`connectOverCDP`, never close the browser from a script, never launch one browser per script. Screenshots go in
-`.orchestra-test/`.
+**One log check first**: search the logs once for error lines since the tests began (slot: `app slot logs <service>
+--lines 400` for each service that ran; shared app: `.run-logs/*.log`). Leave out what is plainly noise (say so),
+list the rest with service and time.
 
-## 7. Report
+A short table: each check, AI or user, passed or failed, plus the errors that log check found. Then the fixes you made
+(with the commit, if you committed), the state you changed and did not put back (the selected project, the records the
+test created and in which data: the slot's copy or which DB), **whether `Debug.json` is still switched, with the backup
+path** (shared app only), and which repos were served from the user's own checkout (not this run's).
 
-**One log check first.** Search the `.run-logs/*.log` files once for error lines since the user started testing
-(`^fail:`, `Unhandled exception`, `Exception:`, `ERROR`, HTTP 5xx), so an error in a service the user did not look at
-is not missed. One search, not a watcher. Leave out what is plainly noise (say so), list the rest with service and time.
+## 7. Before the step ends
 
-A short table: each check, passed or failed (as the user told you), plus the errors that log check found. Then the fixes
-you made (with the commit, if you committed), the state you changed in the app and did not put back (the selected
-project, the forms the test created and on which DB, and **whether `Debug.json` is still switched, with the backup
-path**), and which repos were served from the user's own checkout (not a worktree of this run).
+**Slot (the usual way).** Ask with a click: **Stop the app (Recommended)** - its RAM is freed, its data stays for the
+next round and for QA · **Keep it running** - for QA soon (it keeps one of the N slots busy; `orch app slot <run>
+stop` stops it later). Then `app slot stop` if they chose so. The slot itself (and its data) is deleted only when the
+run is cleaned up.
 
-## 8. Stop the app before the step ends
+**Shared app.** Never leave it running into the next step: ask if they are done, then `app stop` (exit code 5: ask
+before `app stop --force`), check that `http://localhost:9000/` and `http://127.0.0.1:50544/health` no longer answer
+and no `Orbitax.*` process from this workspace is left, then `app release`. Say if `Debug.json` is still switched.
 
-**Never leave the app running into the next step.** The run lets go of the lock when the step ends, but nothing stops
-the app until the run is cleaned up, so it would keep running with this run's code.
-
-1. After the report, ask the user if they are done with the app (they may want one more look). Wait for the answer.
-2. Run `app stop`. It stops the launcher's tree, everything on the app's ports, and the hosts with no port that run
-   from this workspace (the Spreadsheet Job, the AppHost's resources). Exit code 5 ("not started by Orchestra"): a
-   process on the ports is not from a run folder. Ask the user before `app stop --force`.
-3. Check that the app is really down: `http://localhost:9000/`, `http://127.0.0.1:50544/health` and the dashboard
-   (:15200) no longer answer, and no `Orbitax.*` process from this workspace is left (the Mission consumer, the
-   Scheduler, the Spreadsheet Job). If one is, stop its tree (`taskkill /PID <pid> /T /F`) and tell the user, so
-   Orchestra can be fixed.
-4. Run `app release`.
-5. Say that the app is stopped and that `Debug.json` is still switched, if it is. Then end as every Orchestra step does:
-   WHAT I DID AND WHY, then `ORCHESTRA:DONE`.
+Then end as every Orchestra step does: WHAT I DID AND WHY, then `ORCHESTRA:DONE`.
 
 ## Start the app again at a later step ("preqa")
 
-After the user's own test, QA often comes and tests on the user's PC ("preqa"). This can happen at any later step of
-the run. The user then calls this skill again, or says "start the app for preqa".
+QA often comes later and tests on the user's PC, at any later step of the run, until the run is cleaned up. The user
+calls this skill again, says "start the app for preqa", or runs `orch app slot <run> up` themselves.
 
-- **Do only the app part:** step 2's questions about the services and the DB, then step 3 (build, take, start, up-check),
-  and step 4's dashboard line. Skip the test plan and the click path: QA has its own. No live log watcher.
+- **Do only the app part:** `app build` if the code changed, then `app slot up --minutes 9` (the slot keeps its data
+  and its services; it takes the newest build). Give the user the link to hand over. The page signs in as the user's
+  usual user. Skip the test plan and the click path: QA has its own. No live log watcher.
 - **Do not end the current step.** The run is on another step, so end those replies with neither `ORCHESTRA:DONE` nor
-  `ORCHESTRA:FAILED`. Writing `ORCHESTRA:DONE` here would close the step the run is on, and the run would skip it.
-- **What QA finds is tracked work.** Before you fix it, add it as a task on this run's epic. Do not fix it off the books.
-  Do not count it as a fix round.
-- **When QA is done**, do step 8's stop (ask, `app stop`, check the ports, `app release`). Then go
-  back to the step the run is on.
+  `ORCHESTRA:FAILED`.
+- **What QA finds is tracked work.** Before you fix it, add it as a task on this run's epic. Not a fix round.
+- **When QA is done**, ask, then `app slot stop` (data kept). Then go back to the step the run is on.

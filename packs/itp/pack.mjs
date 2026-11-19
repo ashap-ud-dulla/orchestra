@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import tracking from './tracking.mjs';
 import { stopFor } from './app/procs.mjs';
+import * as slots from './app/slots.mjs';
 
 // Tokens in repo_dir_for that are not code repos a run works in.
 const NOT_A_RUN_REPO = new Set(['itp-workspace', 'progress']);
@@ -114,12 +115,37 @@ export default {
   // The core's starter skills (orch-plan, orch-build, orch-review, orch-hello) are not installed: ITP has its own.
   starterSkills: false,
 
-  // The ITP app (app/app.mjs, run through bin/app.mjs): the AppHost or run-stack launcher, Debug.json, Mission,
-  // Outsider. stopFor: clean-up stops it when it serves the run's folder.
-  app: { script: 'app/app.mjs', stopFor },
-  // orch settings launcher=apphost|runstack: how the app starts.
+  // The ITP app (app/app.mjs, run through bin/app.mjs). Two kinds:
+  // - app slots (app/slots.mjs): each run tests in its own itp-stacks stack on its own copy of your Local DB, side by
+  //   side (settings stacks=N run at once). ownCopies: steps marked "uses app" then wait in no shared line.
+  // - the one shared app (your main stack: the AppHost or run-stack launcher, Debug.json): yours, and runs that need
+  //   the Global DB take it with `app take`. stacks=0 makes every run use it, as before.
+  // stopFor (hold, clean): stops the shared app when it serves the folder, and the run's slot (data kept).
+  // dropFor (clean, delete): deletes the run's slot and its data.
+  app: {
+    script: 'app/app.mjs',
+    async stopFor(dir) {
+      const notes = [await stopFor(dir)];
+      const mine = slots.slotOfDir(dir);
+      if (mine) notes.push(await slots.stop(mine.runId, { quiet: true }).catch((err) => `could not stop its app slot: ${err.message}`));
+      return notes.filter(Boolean).join('; ') || null;
+    },
+    async dropFor(dir, runId) {
+      const id = runId && slots.readState().slots[runId] ? runId : dir && slots.slotOfDir(dir)?.runId;
+      return id ? slots.drop(id, { quiet: true }) : null;
+    },
+    ownCopies: (settings) => slots.maxOf(settings) > 0,
+    note: (settings) => slots.statusNote(settings),
+    help: [
+      { usage: 'app slots', about: 'each run\'s own app (its slot): which run, running or stopped, its link; the master copy of your Local DB' },
+      { usage: 'app slot <run> up|stop|restart|fresh|drop|logs [service]', about: 'a run\'s own app: up wakes it (pre-QA: the link to hand over), fresh = clean data from the master copy, drop deletes it' },
+      { usage: 'app master [refresh]', about: 'the master copy every slot starts from; refresh remakes it from your Local DB (~30 min, in the background)' },
+    ],
+  },
+  // orch settings launcher=apphost|runstack: how the shared app starts. stacks=N: app slots running at once (0 = off).
   settings: {
     launcher: { values: ['apphost', 'runstack'], default: 'apphost', about: 'the app starts with', words: { apphost: 'the Aspire AppHost (apphost)', runstack: 'run-stack.ps1 (runstack)' } },
+    stacks: { values: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'], default: '3', about: 'app slots running at once (each run tests in its own app; 0 = one shared app)', words: { 0: '0 (off: one shared app, runs wait in line)' } },
   },
   // Clean-up: shared .NET build servers keep DLLs open in a run folder.
   freeFiles() {
