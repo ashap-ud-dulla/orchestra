@@ -1740,6 +1740,8 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   const bare = await plain('setup', 'worktrees=' + runsAt);
   assert.equal(bare.code, 0, bare.err + bare.out);
   assert.match(bare.out, /Solution folder: none[^]*Pack: none[^]*Run folders go in: .*fresh-runs[^]*orch: installed/);
+  assert.match(bare.out, /Next: open a NEW Claude Code window/, 'a window open before setup does not know /orch');
+  assert.doesNotMatch(bare.out, /For the app/, 'no pack, no app to check');
   assert.doesNotMatch(bare.out, /app-test/, 'no ITP skills without the ITP pack');
   assert.equal((await plain('status')).code, 0);
   assert.match((await plain('app')).err, /this solution has no app/);
@@ -1753,6 +1755,12 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   assert.match(s.out, /Solution folder: .*itp-base[^]*Pack: itp/);
   assert.match(fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8'), /# The ITP part \(the ITP pack\)/, 'the pack adds its part to /orch');
   assert.match(s.out, /dev@example\.com/);
+  assert.match(s.out, /For the app \(runs work without it\):\n  ok Docker Desktop: found\n  ok itp-stacks skill: found/);
+  // A PC with no Docker and an ITP folder without itp-stacks: setup says so (runs still work).
+  const noApp = await proc([path.join(ROOT, 'bin/orch.mjs'), 'setup'], { extraEnv: { ORCHESTRA_DATA_DIR: data, ORCHESTRA_HOME_SKILLS: home, ORCHESTRA_SOLUTION_ROOT: '', ORCHESTRA_USER_EMAIL: '', ORCHESTRA_PACK: 'itp', ORCHESTRA_STACKS: '', ORCHESTRA_DOCKER: JSON.stringify([path.join(tmp, 'no-docker', 'docker.exe')]) } });
+  assert.equal(noApp.code, 0, noApp.err + noApp.out);
+  assert.match(noApp.out, /!! Docker Desktop: not installed[^\n]*needed only for "Test in the app"/);
+  assert.match(noApp.out, /!! itp-stacks skill: missing[^\n]*pull the ITP folder/);
   assert.ok(fs.existsSync(path.join(data, 'templates', 'feature-template.json')), 'starter templates copied');
   const skill = fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8');
   assert.ok(!skill.includes('{{'), 'placeholders filled');
@@ -2017,6 +2025,71 @@ test('safety: claude from npm (claude.cmd) runs its script with node; a failed h
   assert.equal(failedOutputFor('UserPromptSubmit', { prompt: 'what is next?' }, err).output.decision, undefined, 'talk goes on to Claude');
   assert.match(failedOutputFor('Stop', {}, err).output.systemMessage, /could not move the run on/);
   assert.deepEqual(failedOutputFor('PostToolUse', {}, err), {});
+});
+
+test('safety: claude from npm 2.x (claude.cmd starts bin\\claude.exe) runs that program; a half install says how to fix it', async () => {
+  const { claudeCommand, claudeFound, shimTarget, shimScript } = await import('../lib/claude-cmd.mjs');
+  const { config } = await import('../lib/config.mjs');
+  const { checkClaude } = await import('../lib/setup.mjs');
+  const bin = path.join(tmp, 'npm2-bin');
+  const exe = path.join(bin, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  // What npm (cmd-shim) writes for a package whose command is a program, not a script.
+  const shim = path.join(bin, 'claude.cmd');
+  fs.writeFileSync(shim, '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n');
+  const was = config.claudeBin;
+  try {
+    // The stand-in the package ships before its install step copies the real program in (500 bytes).
+    fs.writeFileSync(exe, Buffer.alloc(500));
+    config.claudeBin = shim;
+    assert.throws(() => claudeCommand(['x']), /did not finish installing.*stand-in.*irm https:\/\/claude\.ai\/install\.ps1/);
+    assert.match(checkClaude().missing, /^claude \(Claude Code from npm .* did not finish installing/);
+    // After the install step: the real program (big). Runs start it directly, never through cmd.exe.
+    fs.writeFileSync(exe, Buffer.alloc(200 * 1024));
+    assert.deepEqual(shimTarget(shim), { file: exe, exe: true });
+    assert.equal(shimScript(shim), null, 'not a node script');
+    assert.deepEqual(claudeCommand(['-p', 'hi']), { cmd: exe, args: ['-p', 'hi'] });
+    assert.deepEqual(claudeFound(), { file: exe, kind: 'npm' });
+  } finally {
+    config.claudeBin = was;
+  }
+});
+
+test('safety: with claude.cmd (npm) and claude.exe (native) both on PATH, runs use claude.exe, whatever the PATH order', async () => {
+  const { claudeCommand } = await import('../lib/claude-cmd.mjs');
+  const { config } = await import('../lib/config.mjs');
+  const npmDir = path.join(tmp, 'both-npm');
+  const nativeDir = path.join(tmp, 'both-native');
+  fs.mkdirSync(path.join(npmDir, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
+  fs.mkdirSync(nativeDir, { recursive: true });
+  fs.writeFileSync(path.join(npmDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'), '');
+  fs.writeFileSync(path.join(npmDir, 'claude.cmd'), '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+  fs.writeFileSync(path.join(nativeDir, 'claude.exe'), Buffer.alloc(200 * 1024));
+  const was = { bin: config.claudeBin, PATH: process.env.PATH };
+  try {
+    process.env.PATH = [npmDir, nativeDir].join(path.delimiter); // npm's folder first
+    config.claudeBin = 'claude';
+    assert.deepEqual(claudeCommand(['x']), { cmd: path.join(nativeDir, 'claude.exe'), args: ['x'] });
+  } finally {
+    config.claudeBin = was.bin;
+    process.env.PATH = was.PATH;
+  }
+});
+
+test('setup: checks claude by starting it the way runs do, and says which one it found', async () => {
+  const { config } = await import('../lib/config.mjs');
+  const { checkClaude } = await import('../lib/setup.mjs');
+  const was = config.claudeBin;
+  try {
+    config.claudeBin = path.join(ROOT, 'test/fake-claude.mjs');
+    const ok = checkClaude();
+    assert.equal(ok.missing, undefined, ok.missing);
+    assert.match(ok.line, /^Claude Code: .+ \(script: .*fake-claude\.mjs\)$/);
+    config.claudeBin = path.join(tmp, 'no-such-claude.cmd');
+    assert.match(checkClaude().missing, /^claude \(found .*no-such-claude\.cmd, but not the program it starts\. Install the native Claude Code/);
+  } finally {
+    config.claudeBin = was;
+  }
 });
 
 test('safety: a lock whose holder stopped writing its time is taken over, even when the pid is alive', async () => {

@@ -151,6 +151,19 @@ export function dockerProblem() {
   return 'Docker is not running: start Docker Desktop and wait until it says "Engine running"';
 }
 
+// orch setup: what "Test in the app" needs on this PC, found or not ([{ ok, text }]). Only looks (no docker info:
+// Docker Desktop need not run during setup).
+export function setupCheck(root) {
+  const [exe] = dockerExe();
+  const dockerOk = fake() || exe === 'docker' || fs.existsSync(exe);
+  const script = root ? path.join(root, '.claude', 'skills', 'itp-stacks', 'stacks.ps1') : null;
+  const stacksOk = fake() || (script && fs.existsSync(script));
+  return [
+    { ok: dockerOk, text: dockerOk ? 'Docker Desktop: found' : 'Docker Desktop: not installed (install it from docker.com; needed only for "Test in the app")' },
+    { ok: stacksOk, text: stacksOk ? 'itp-stacks skill: found' : `itp-stacks skill: missing${script ? ` (${script})` : ''}: pull the ITP folder; needed only for "Test in the app"` },
+  ];
+}
+
 export function stacksScript() {
   return config.solutionRoot ? path.join(config.solutionRoot, '.claude', 'skills', 'itp-stacks', 'stacks.ps1') : null;
 }
@@ -712,6 +725,6 @@ export function statusNote(settings) {
   if (running || Object.keys(s.want).length) out.push(`App slots: ${running} of ${maxOf(settings)} running${Object.keys(s.want).length ? `, ${Object.keys(s.want).length} waiting` : ''} (orch app slots)`);
   if (s.refreshing && alive(s.refreshing.pid)) out.push('Master copy: a new one is being made (orch app master)');
   else if (g && ageDays(g.at) >= GOLDEN_OLD_DAYS) out.push(`Master copy is ${ageDays(g.at)} days old: orch app master refresh (~30 min, in the background)`);
-  else if (!g) out.push('No master copy yet for app slots: orch app master refresh (~30 min, in the background)');
+  else if (!g) out.push('Test in the app: each run gets its own app on a copy of your Local DB. Make that copy once, when you first need it: orch app master refresh (needs Docker Desktop running; ~30 min, in the background)');
   return out.length ? out.join('\n') : null;
 }

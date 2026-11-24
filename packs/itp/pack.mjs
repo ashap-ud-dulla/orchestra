@@ -135,6 +135,7 @@ export default {
       return id ? slots.drop(id, { quiet: true }) : null;
     },
     ownCopies: (settings) => slots.maxOf(settings) > 0,
+    setupCheck: (root) => slots.setupCheck(root),
     note: (settings) => slots.statusNote(settings),
     help: [
       { usage: 'app slots', about: 'each run\'s own app (its slot): which run, running or stopped, its link; the master copy of your Local DB' },
