@@ -2076,6 +2076,22 @@ test('safety: with claude.cmd (npm) and claude.exe (native) both on PATH, runs u
   }
 });
 
+test('notify: the notification really runs after the process that sent it has ended, whatever its text', async () => {
+  if (process.platform !== 'win32') return;
+  // A detached PowerShell ran nothing, and a plain child died with its hook: every notification was lost silently.
+  // The probe makes the real toast script write a file instead of showing a pop-up.
+  const probe = path.join(tmp, 'notify-probe.txt');
+  fs.rmSync(probe, { force: true });
+  const sender = `import { notify } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'lib/notify.mjs')).href)};
+    console.log(notify({ title: "it's \\"quoted\\" $(Write-Output x) \`n", body: 'a\\nb ; & | <x>', url: '' }));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', sender], { encoding: 'utf8', env: { ...env, ORCHESTRA_NOTIFY: '1', ORCHESTRA_NOTIFY_PROBE: probe } });
+  assert.equal(r.stdout.trim(), 'true', r.stderr);
+  for (let i = 0; i < 60 && !fs.existsSync(probe); i++) await new Promise((ok) => setTimeout(ok, 250));
+  assert.ok(fs.existsSync(probe), 'the toast script ran (after its sender ended)');
+  const off = spawnSync(process.execPath, ['--input-type=module', '-e', sender], { encoding: 'utf8', env: { ...env, ORCHESTRA_NOTIFY: '0' } });
+  assert.equal(off.stdout.trim(), 'null', 'off says off');
+});
+
 test('setup: checks claude by starting it the way runs do, and says which one it found', async () => {
   const { config } = await import('../lib/config.mjs');
   const { checkClaude } = await import('../lib/setup.mjs');
