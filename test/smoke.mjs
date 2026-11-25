@@ -3182,6 +3182,28 @@ test('clean-up: a helper claude started that lost its parent is still stopped; a
   parent.kill();
   await waitFor(() => !alive(parent.pid), 'the parent ends');
   assert.ok(alive(helper), 'the helper outlives its parent');
+  // A busy step's many short processes (here 600 that ended) never push a helper that still runs out of the record.
+  const flood = Array.from({ length: 600 }, (_, i) => ({ pid: 900000 + i, created: '2026-01-01T00:00:00.0000000Z' }));
+  fs.writeFileSync(procs, JSON.stringify([...JSON.parse(fs.readFileSync(procs, 'utf8')), ...flood]));
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},20000)'], { stdio: 'ignore' });
+  try {
+    await waitFor(async () => {
+      await recordTree(procs, process.pid);
+      return !JSON.parse(fs.readFileSync(procs, 'utf8')).some((p) => p.pid >= 900000);
+    }, 'ended entries are dropped');
+  } finally {
+    sleeper.kill();
+  }
+  assert.ok(JSON.parse(fs.readFileSync(procs, 'utf8')).some((p) => p.pid === helper), 'the helper that still runs stays recorded');
+  // A helper named by the Git Bash path of the folder (/c/…/ws/, as Claude's Bash tool writes it) is found too.
+  const bashPath = path.resolve(ws).replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) + '/driver.js';
+  const bashy = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', bashPath], { stdio: 'ignore' });
+  try {
+    const { processesIn } = await import('../lib/app.mjs');
+    await waitFor(() => processesIn(ws).some((p) => p.pid === bashy.pid), 'a process naming /c/… is found');
+  } finally {
+    bashy.kill();
+  }
   // The folder is held: removing it waits, then says plainly what to do.
   process.env.ORCHESTRA_RM_WAIT_MS = '1500';
   try {
