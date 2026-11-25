@@ -1748,10 +1748,19 @@ test('setup: a fresh clone learns the solution folder and its pack, gets the sta
   // The menu skill before it was /orch, installed by an older setup: removed (no run tab is open).
   fs.mkdirSync(path.join(home, 'orchestra'), { recursive: true });
   fs.writeFileSync(path.join(home, 'orchestra', '.orchestra-installed.json'), '{}');
+  // A skill an older setup installed that Orchestra no longer has at all (itp-research): removed too. A skill of
+  // yours with the same look but no mark is never touched.
+  fs.mkdirSync(path.join(home, 'itp-research'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'itp-research', '.orchestra-installed.json'), '{}');
+  fs.mkdirSync(path.join(home, 'my-own-skill'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'my-own-skill', 'SKILL.md'), 'mine\n');
   const s = await fresh('setup', 'solution=' + testItp, 'email=dev@example.com', 'worktrees=' + runsAt);
   assert.equal(s.code, 0, s.err + s.out);
   assert.match(s.out, /orchestra: old name, removed/);
   assert.ok(!fs.existsSync(path.join(home, 'orchestra')));
+  assert.match(s.out, /itp-research: not in this pack, removed/);
+  assert.ok(!fs.existsSync(path.join(home, 'itp-research')));
+  assert.ok(fs.existsSync(path.join(home, 'my-own-skill', 'SKILL.md')), 'yours is never touched');
   assert.match(s.out, /Solution folder: .*itp-base[^]*Pack: itp/);
   assert.match(fs.readFileSync(path.join(home, 'orch', 'SKILL.md'), 'utf8'), /# The ITP part \(the ITP pack\)/, 'the pack adds its part to /orch');
   assert.match(s.out, /dev@example\.com/);
