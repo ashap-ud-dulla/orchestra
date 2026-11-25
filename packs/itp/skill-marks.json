@@ -1,6 +1,5 @@
 {
   "wrap-up": "clean",
   "bug-logs": "clean",
-  "intake": "clean",
-  "itp-research": "clean"
+  "intake": "clean"
 }
